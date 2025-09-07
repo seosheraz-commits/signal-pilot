@@ -5,6 +5,7 @@ import { ema, rsi, macd, atr, donchian, bollingerBandwidth } from '../lib/indica
 import { detectPattern, candleName, type Bar as PatBar } from '../lib/patterns';
 
 type Exchange = 'binance' | 'mexc';
+type Market = 'spot' | 'futures';
 type Bar = { time: number; open: number; high: number; low: number; close: number };
 
 export type Config = {
@@ -74,50 +75,41 @@ function fallbackPattern(prev?: Bar, cur?: Bar) {
   return { name: '', dir: 0 };
 }
 
-async function fetchKlinesWithFallback(ex: Exchange, sym: string, tf: string) {
-  const core = `api/v3/klines?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(tf)}&limit=500`;
-  const urls =
-    ex === 'mexc'
-      ? [`https://api.mexc.com/${core}`, `https://corsproxy.io/?https://api.mexc.com/${core}`]
-      : [`https://api.binance.com/${core}`, `https://data-api.binance.vision/${core}`, `https://corsproxy.io/?https://api.binance.com/${core}`];
-  for (const u of urls) {
-    try {
-      const r = await fetch(u, { cache: 'no-store' });
-      if (!r.ok) continue;
-      const arr = (await r.json()) as any[];
-      if (Array.isArray(arr) && arr.length) {
-        return arr.map((k) => ({
-          time: Math.floor(Number(k[0]) / 1000),
-          open: Number(k[1]),
-          high: Number(k[2]),
-          low: Number(k[3]),
-          close: Number(k[4]),
-        })) as Bar[];
-      }
-    } catch {}
-  }
-  throw new Error('all klines endpoints failed');
+/* ---------------- Our API fetchers (unified spot/futures) ---------------- */
+
+async function fetchKlinesViaApi(ex: Exchange, mk: Market, sym: string, tf: string, limit = 500) {
+  const url = `/api/klines?exchange=${ex}&market=${mk}&symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(tf)}&limit=${limit}`;
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`klines ${r.status}`);
+  const d = await r.json();
+  const arr: any[] = Array.isArray(d?.candles) ? d.candles : [];
+  if (!arr.length) throw new Error('no candles');
+  // Binance-style array: [openTime, open, high, low, close, volume, ...]
+  return arr.map((k) => ({
+    time: Math.floor(Number(k[0]) / 1000),
+    open: Number(k[1]),
+    high: Number(k[2]),
+    low: Number(k[3]),
+    close: Number(k[4]),
+  })) as Bar[];
 }
 
-async function fetchTickerPriceWithFallback(ex: Exchange, sym: string): Promise<number | null> {
-  const core = `api/v3/ticker/price?symbol=${encodeURIComponent(sym)}`;
-  const urls =
-    ex === 'mexc'
-      ? [`https://api.mexc.com/${core}`, `https://corsproxy.io/?https://api.mexc.com/${core}`]
-      : [`https://api.binance.com/${core}`, `https://data-api.binance.vision/${core}`, `https://corsproxy.io/?https://api.binance.com/${core}`];
-  for (const u of urls) {
-    try {
-      const r = await fetch(u, { cache: 'no-store' });
-      if (!r.ok) continue;
-      const p = Number((await r.json())?.price);
-      if (p > 0 && Number.isFinite(p)) return p;
-    } catch {}
+async function fetchTickerViaApi(ex: Exchange, mk: Market, sym: string): Promise<number | null> {
+  const url = `/api/ticker?exchange=${ex}&market=${mk}&symbol=${encodeURIComponent(sym)}`;
+  try {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const p = Number(d?.price);
+    return Number.isFinite(p) && p > 0 ? p : null;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 export default function CandleChart({
   exchange = 'binance',
+  market = 'spot',
   symbol = 'BTCUSDT',
   interval = '5m',
   onSignal,
@@ -125,6 +117,7 @@ export default function CandleChart({
   config,
 }: {
   exchange?: Exchange;
+  market?: Market;
   symbol?: string;
   interval?: string;
   onSignal?: (s: Signal) => void;
@@ -174,10 +167,10 @@ export default function CandleChart({
     return () => clearInterval(id);
   }, []);
 
-  // freeze Entry/SL/TP for 5s when symbol changes
+  // freeze Entry/SL/TP for 5s when symbol/market/exchange changes
   useEffect(() => {
     setFreezeUntil(Date.now() + 5000);
-  }, [symbol]);
+  }, [symbol, market, exchange]);
 
   function setLivePriceLine(p: number) {
     setLivePrice(p);
@@ -300,10 +293,8 @@ export default function CandleChart({
       if (insideNow && brokeDn) reasons.push('Bear Fakeout (reclaim)');
     }
 
-    // freeze Entry/SL/TP for 5s after symbol changes
-    let entryF = entry,
-      slF = sl,
-      tpF = tp;
+    // freeze Entry/SL/TP for 5s after symbol/market/exchange changes
+    let entryF = entry, slF = sl, tpF = tp;
     if (Date.now() < freezeUntil && sig) {
       entryF = sig.entry;
       slF = sig.sl;
@@ -343,61 +334,25 @@ export default function CandleChart({
 
     // entry/sl/tp lines refresh (with frozen values)
     if (config.overlays.signalLevels && (label === 'Long' || label === 'Short')) {
-      try {
-        if (entryLineRef.current) seriesRef.current?.removePriceLine(entryLineRef.current);
-      } catch {}
-      try {
-        if (slLineRef.current) seriesRef.current?.removePriceLine(slLineRef.current);
-      } catch {}
-      try {
-        if (tpLineRef.current) seriesRef.current?.removePriceLine(tpLineRef.current);
-      } catch {}
-      entryLineRef.current = seriesRef.current?.createPriceLine({
-        price: entryF,
-        color: '#facc15',
-        lineWidth: 2,
-        title: `Entry ${entryF.toFixed(6)}`,
-      });
-      slLineRef.current = seriesRef.current?.createPriceLine({
-        price: slF,
-        color: '#ef4444',
-        lineWidth: 2,
-        title: `SL ${slF.toFixed(6)}`,
-      });
-      tpLineRef.current = seriesRef.current?.createPriceLine({
-        price: tpF,
-        color: '#22c55e',
-        lineWidth: 2,
-        title: `TP ${tpF.toFixed(6)}`,
-      });
+      try { if (entryLineRef.current) seriesRef.current?.removePriceLine(entryLineRef.current); } catch {}
+      try { if (slLineRef.current) seriesRef.current?.removePriceLine(slLineRef.current); } catch {}
+      try { if (tpLineRef.current) seriesRef.current?.removePriceLine(tpLineRef.current); } catch {}
+      entryLineRef.current = seriesRef.current?.createPriceLine({ price: entryF, color: '#facc15', lineWidth: 2, title: `Entry ${entryF.toFixed(6)}` });
+      slLineRef.current = seriesRef.current?.createPriceLine({ price: slF, color: '#ef4444', lineWidth: 2, title: `SL ${slF.toFixed(6)}` });
+      tpLineRef.current = seriesRef.current?.createPriceLine({ price: tpF, color: '#22c55e', lineWidth: 2, title: `TP ${tpF.toFixed(6)}` });
     }
 
     // support / resistance from last 20 bars
-    let recentHigh = -Infinity,
-      recentLow = Infinity;
+    let recentHigh = -Infinity, recentLow = Infinity;
     const LBL = 20;
     for (let j = Math.max(0, b.length - LBL); j < b.length; j++) {
       recentHigh = Math.max(recentHigh, b[j].high);
       recentLow = Math.min(recentLow, b[j].low);
     }
-    try {
-      if (supportLineRef.current) seriesRef.current?.removePriceLine(supportLineRef.current);
-    } catch {}
-    try {
-      if (resistanceLineRef.current) seriesRef.current?.removePriceLine(resistanceLineRef.current);
-    } catch {}
-    supportLineRef.current = seriesRef.current?.createPriceLine({
-      price: recentLow,
-      color: '#06b6d4',
-      lineWidth: 1,
-      title: `Support ${recentLow.toFixed(6)}`,
-    });
-    resistanceLineRef.current = seriesRef.current?.createPriceLine({
-      price: recentHigh,
-      color: '#a855f7',
-      lineWidth: 1,
-      title: `Resistance ${recentHigh.toFixed(6)}`,
-    });
+    try { if (supportLineRef.current) seriesRef.current?.removePriceLine(supportLineRef.current); } catch {}
+    try { if (resistanceLineRef.current) seriesRef.current?.removePriceLine(resistanceLineRef.current); } catch {}
+    supportLineRef.current = seriesRef.current?.createPriceLine({ price: recentLow, color: '#06b6d4', lineWidth: 1, title: `Support ${recentLow.toFixed(6)}` });
+    resistanceLineRef.current = seriesRef.current?.createPriceLine({ price: recentHigh, color: '#a855f7', lineWidth: 1, title: `Resistance ${recentHigh.toFixed(6)}` });
 
     // closed-bar markers
     if (!hotPrice && closedIdx >= 1) {
@@ -440,18 +395,9 @@ export default function CandleChart({
       try { wsTradeRef.current?.close(); } catch {}
       wsKlineRef.current = null;
       wsTradeRef.current = null;
-      if (pollKlinesRef.current) {
-        clearInterval(pollKlinesRef.current);
-        pollKlinesRef.current = null;
-      }
-      if (pollTickerRef.current) {
-        clearInterval(pollTickerRef.current);
-        pollTickerRef.current = null;
-      }
-      if (chartRef.current) {
-        chartRef.current.remove();
-        chartRef.current = null;
-      }
+      if (pollKlinesRef.current) { clearInterval(pollKlinesRef.current); pollKlinesRef.current = null; }
+      if (pollTickerRef.current) { clearInterval(pollTickerRef.current); pollTickerRef.current = null; }
+      if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
       markersRef.current = [];
       barsRef.current = [];
       setPatternTape([]);
@@ -487,9 +433,9 @@ export default function CandleChart({
       donURef.current = chart.addLineSeries({ color: '#10b981', lineWidth: 1 });
       donLRef.current = chart.addLineSeries({ color: '#10b981', lineWidth: 1 });
 
-      // history
+      // history via our API
       try {
-        const data = await fetchKlinesWithFallback(exchange as Exchange, symbol, interval);
+        const data = await fetchKlinesViaApi(exchange as Exchange, market as Market, symbol, interval);
         if (disposed) return;
         barsRef.current = data;
         series.setData(data);
@@ -499,31 +445,29 @@ export default function CandleChart({
         return;
       }
 
-      // seed live
-      const seed = await fetchTickerPriceWithFallback(exchange as Exchange, symbol);
+      // seed live via API ticker
+      const seed = await fetchTickerViaApi(exchange as Exchange, market as Market, symbol);
       if (seed) {
         setLivePriceLine(seed);
         computeAndDecorate(seed);
       }
 
-      // live
+      // live updates
       if (exchange === 'binance') {
-        const wsK = new WebSocket(
-          `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@kline_${interval}`,
-        );
+        // Spot WS host → stream.binance.com, Futures WS host → fstream.binance.com
+        const host = market === 'futures' ? 'wss://fstream.binance.com/ws' : 'wss://stream.binance.com:9443/ws';
+        const klineUrl = `${host}/${symbol.toLowerCase()}@kline_${interval}`;
+        const tradeUrl = `${host}/${symbol.toLowerCase()}@trade`;
+
+        const wsK = new WebSocket(klineUrl);
         wsKlineRef.current = wsK;
-        wsK.onopen = () => {
-          if (wsKlineRef.current === wsK) setWsInfo(`WS: live (${symbol})`);
-        };
-        wsK.onclose = () => {
-          if (wsKlineRef.current === wsK) setWsInfo('WS: closed');
-        };
-        wsK.onerror = () => {
-          if (wsKlineRef.current === wsK) setWsInfo('WS: error');
-        };
+        wsK.onopen = () => { if (wsKlineRef.current === wsK) setWsInfo(`WS: live (${symbol})`); };
+        wsK.onclose = () => { if (wsKlineRef.current === wsK) setWsInfo('WS: closed'); };
+        wsK.onerror = () => { if (wsKlineRef.current === wsK) setWsInfo('WS: error'); };
         wsK.onmessage = (e) => {
           if (wsKlineRef.current !== wsK) return;
-          const k = JSON.parse(e.data)?.k;
+          let k: any;
+          try { k = JSON.parse(e.data)?.k; } catch { return; }
           if (!k) return;
           const bar: Bar = { time: Math.floor(k.t / 1000), open: +k.o, high: +k.h, low: +k.l, close: +k.c };
           if (k.x) {
@@ -540,22 +484,30 @@ export default function CandleChart({
           }
         };
 
-        const wsT = new WebSocket(`wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@trade`);
+        const wsT = new WebSocket(tradeUrl);
         wsTradeRef.current = wsT;
         wsT.onmessage = (e) => {
           if (wsTradeRef.current !== wsT) return;
-          const p = Number(JSON.parse(e.data)?.p);
-          if (p) {
-            setLivePriceLine(p);
-            computeAndDecorate(p);
+          let price: number | null = null;
+          try {
+            const obj = JSON.parse(e.data);
+            // spot & futures both include 'p' for price
+            price = Number(obj?.p);
+          } catch {}
+          if (price) {
+            setLivePriceLine(price);
+            computeAndDecorate(price);
           }
         };
+
       } else {
-        setWsInfo('Poll: 2s + ticker 1s');
+        // MEXC (spot & futures) → stable polling via our API
+        setWsInfo('Poll: 2s klines + 1s ticker');
         let lastClosed = barsRef.current[barsRef.current.length - 1]?.time ?? 0;
+
         pollKlinesRef.current = setInterval(async () => {
           try {
-            const arr = await fetchKlinesWithFallback('mexc', symbol, interval);
+            const arr = await fetchKlinesViaApi('mexc', market as Market, symbol, interval);
             if (!arr.length) return;
             const latest = arr[arr.length - 1];
             barsRef.current = arr;
@@ -566,8 +518,9 @@ export default function CandleChart({
             }
           } catch {}
         }, 2000);
+
         pollTickerRef.current = setInterval(async () => {
-          const p = await fetchTickerPriceWithFallback('mexc', symbol);
+          const p = await fetchTickerViaApi('mexc', market as Market, symbol);
           if (p) {
             setLivePriceLine(p);
             computeAndDecorate(p);
@@ -584,12 +537,9 @@ export default function CandleChart({
       wsTradeRef.current = null;
       if (pollKlinesRef.current) clearInterval(pollKlinesRef.current);
       if (pollTickerRef.current) clearInterval(pollTickerRef.current);
-      if (chartRef.current) {
-        chartRef.current.remove();
-        chartRef.current = null;
-      }
+      if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
     };
-  }, [exchange, symbol, interval, config]);
+  }, [exchange, market, symbol, interval, config]);
 
   return (
     <div style={{ position: 'relative' }}>
@@ -676,7 +626,7 @@ export default function CandleChart({
         </div>
       )}
 
-      {/* HUD top-right (uses state `sig`) */}
+      {/* HUD top-right */}
       {config.overlays.hud && (
         <div
           style={{
