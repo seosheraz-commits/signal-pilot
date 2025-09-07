@@ -4,8 +4,8 @@
 
 import { MEXC_FUTURES_MAP } from '@/lib/interval';
 
-type Market = 'spot' | 'futures';
-type ExchangeID = 'BINANCE' | 'MEXC';
+export type Market = 'spot' | 'futures';
+export type ExchangeID = 'BINANCE' | 'MEXC';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const last = <T>(arr: T[]) => arr[arr.length - 1];
@@ -115,7 +115,7 @@ function macd(closes: number[], fast = 12, slow = 26, signal = 9) {
 
 /* ---------------- Exchanges & endpoints ---------------- */
 const BINANCE = {
-  id: 'BINANCE' as ExchangeID,
+  id: 'BINANCE' as const,
   spot: {
     klines: (symbol: string, interval: string, limit: number) =>
       `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
@@ -129,7 +129,7 @@ const BINANCE = {
 };
 
 const MEXC = {
-  id: 'MEXC' as ExchangeID,
+  id: 'MEXC' as const,
   spot: {
     klines: (symbol: string, interval: string, limit: number) =>
       `https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
@@ -218,7 +218,6 @@ async function getKlines(
     // futures
     const pair = symbol.endsWith('USDT') ? symbol.replace('USDT', '_USDT') : symbol;
     const iv = (MEXC_FUTURES_MAP as any)[interval] || 'Min1';
-    // Primary
     let data: any;
     try {
       const d = await fetchJson(ex.futures.klines(pair, iv, limit), 8000);
