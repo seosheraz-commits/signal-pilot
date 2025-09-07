@@ -1,27 +1,70 @@
-// app/api/scan/route.ts
-import { NextResponse } from 'next/server';
-import { scanOnce } from '../../../src/engine';
+// app/api/engine/scan/route.ts
+import { NextResponse } from "next/server";
+import { scanOnce } from "@/src/engine";
 
-// Force Node runtime and avoid cache
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export const runtime = "nodejs";
+export const preferredRegion = "sin1";
+export const dynamic = "force-dynamic";
 export const revalidate = 0;
-export const maxDuration = 60;
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const interval = searchParams.get('interval') || '1m';
-  const lookback = Number(searchParams.get('lookback') ?? 150);
-  const maxPerExchange = Number(searchParams.get('maxPerExchange') ?? 36);
+type PickOut = {
+  exchange: "binance" | "mexc";
+  market: "spot" | "futures";
+  symbol: string;
+  side: "long" | "short";
+  confidencePercent: number;
+  riskPercent: number;
+  entry: number;
+  stop: number;
+  tp: number;
+  reason: string;
+};
 
+export async function GET(req: Request) {
   try {
-    const result = await scanOnce({
-      interval,
-      lookback: Math.min(200, Math.max(120, lookback)),
-      maxPerExchange: Math.min(48, Math.max(24, maxPerExchange)),
-    });
-    return NextResponse.json(result, { status: 200 });
+    const u = new URL(req.url);
+    const interval = (u.searchParams.get("interval") || "5m").toLowerCase();
+    const market = (u.searchParams.get("market") || "spot").toLowerCase() as "spot" | "futures" | "both";
+    const lookback = Math.max(120, Math.min(parseInt(u.searchParams.get("lookback") || "150", 10), 200));
+    const maxPerExchange = Math.max(24, Math.min(parseInt(u.searchParams.get("max") || "36", 10), 48));
+
+    const out = await scanOnce({ interval, lookback, maxPerExchange, market });
+
+    const picks: PickOut[] = (Array.isArray(out?.picks) ? out.picks : [])
+      .map((p: any) => {
+        const ex = String(p?.exchange || "").toLowerCase();
+        const exchange: "binance" | "mexc" = ex.includes("mexc") ? "mexc" : "binance";
+        const mk = String(p?.market || market).toLowerCase();
+        const marketNorm: "spot" | "futures" = mk.includes("fut") ? "futures" : "spot";
+        const side = String(p?.side || "").toLowerCase();
+        if (side !== "long" && side !== "short") return null;
+
+        return {
+          exchange,
+          market: marketNorm,
+          symbol: String(p.symbol || ""),
+          side,
+          confidencePercent: Number(p.confidencePercent ?? 60),
+          riskPercent: Number(p.riskPercent ?? 2.5),
+          entry: Number(p.entry ?? p.price ?? 0),
+          stop: Number(p.stop ?? p.stopLoss ?? 0),
+          tp: Number(p.takeProfit ?? p.tp ?? 0),
+          reason: String(p.reasoning ?? p.reason ?? "engine"),
+        } as PickOut;
+      })
+      .filter(Boolean) as PickOut[];
+
+    return NextResponse.json(
+      {
+        picks: picks.slice(0, 3),
+        scanned: out?.universeCount ?? 0,
+        interval: out?.interval ?? interval,
+        engine: true,
+        market: market,
+      },
+      { headers: { "cache-control": "no-store" } }
+    );
   } catch (e: any) {
-    return NextResponse.json({ error: String(e?.message || e) }, { status: 500 });
+    return NextResponse.json({ error: e?.message || "failed" }, { status: 500 });
   }
 }
