@@ -1,9 +1,8 @@
 // app/api/engine/scan/route.ts
 import { NextResponse } from 'next/server';
-import { scanOnce } from '@/src/engine';
+import { scanOnce } from '../../../src/engine'; // ← relative import, no alias
 
 export const runtime = 'nodejs';
-export const preferredRegion = 'sin1';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
@@ -24,28 +23,25 @@ export async function GET(req: Request) {
   try {
     const u = new URL(req.url);
     const interval = (u.searchParams.get('interval') || '5m').toLowerCase();
-    const marketParam = (u.searchParams.get('market') || 'spot').toLowerCase();
-    const market = (['spot', 'futures', 'both'].includes(marketParam) ? marketParam : 'spot') as 'spot' | 'futures' | 'both';
+    const marketQ = (u.searchParams.get('market') || 'spot').toLowerCase();
+    const market: 'spot' | 'futures' | 'both' =
+      marketQ === 'both' ? 'both' : marketQ === 'futures' ? 'futures' : 'spot';
     const lookback = Math.max(120, Math.min(parseInt(u.searchParams.get('lookback') || '150', 10), 200));
     const maxPerExchange = Math.max(24, Math.min(parseInt(u.searchParams.get('max') || '36', 10), 48));
 
     const out = await scanOnce({ market, interval, lookback, maxPerExchange });
 
-    const picks: PickOut[] = (Array.isArray((out as any)?.picks) ? (out as any).picks : [])
+    const picks: PickOut[] = (Array.isArray(out?.picks) ? out.picks : [])
       .map((p: any) => {
         const ex = String(p?.exchange || '').toLowerCase();
         const exchange: 'binance' | 'mexc' = ex.includes('mexc') ? 'mexc' : 'binance';
-
-        const mkRaw = String(p?.market || market).toLowerCase();
-        const marketNorm: 'spot' | 'futures' = mkRaw.includes('fut') ? 'futures' : 'spot';
-
-        const sideStr = String(p?.side || '').toLowerCase();
-        const side: 'long' | 'short' | null = sideStr === 'short' ? 'short' : sideStr === 'long' ? 'long' : null;
-        if (!side) return null;
+        const mk = String(p?.market || market).toLowerCase().includes('fut') ? 'futures' : 'spot';
+        const side = String(p?.side || '').toLowerCase();
+        if (side !== 'long' && side !== 'short') return null;
 
         return {
           exchange,
-          market: marketNorm,
+          market: mk,
           symbol: String(p.symbol || ''),
           side,
           confidencePercent: Number(p.confidencePercent ?? 60),
@@ -61,8 +57,8 @@ export async function GET(req: Request) {
     return NextResponse.json(
       {
         picks: picks.slice(0, 3),
-        scanned: (out as any)?.universeCount ?? 0,
-        interval: (out as any)?.interval ?? interval,
+        scanned: out?.universeCount ?? 0,
+        interval: out?.interval ?? interval,
         market,
         engine: true,
       },
