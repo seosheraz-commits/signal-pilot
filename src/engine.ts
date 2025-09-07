@@ -1,16 +1,21 @@
 // src/engine.ts
-// Fast 90s scanner for BINANCE + MEXC (common USDT pairs)
+// Fast scanner for BINANCE + MEXC across SPOT and FUTURES (USDT pairs)
 // Uses timeouts, small concurrency, and graceful fallbacks.
+
+import { MEXC_FUTURES_MAP } from '@/lib/interval';
+
+type Market = 'spot' | 'futures';
+type ExchangeID = 'BINANCE' | 'MEXC';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const last = <T>(arr: T[]) => arr[arr.length - 1];
 
-// ——— time-bounded fetch
-async function fetchJson(url: string, timeoutMs = 6000) {
+// —— time-bounded fetch
+async function fetchJson(url: string, timeoutMs = 7000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+    const r = await fetch(url, { cache: 'no-store', signal: ctrl.signal, headers: { accept: 'application/json' } });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.json();
   } finally {
@@ -18,6 +23,7 @@ async function fetchJson(url: string, timeoutMs = 6000) {
   }
 }
 
+/* ---------------- TA utils ---------------- */
 function ema(values: number[], period: number) {
   const k = 2 / (period + 1);
   const out: number[] = [];
@@ -107,51 +113,126 @@ function macd(closes: number[], fast = 12, slow = 26, signal = 9) {
   return { line, signal: sigBase, hist };
 }
 
+/* ---------------- Exchanges & endpoints ---------------- */
 const BINANCE = {
-  id: 'BINANCE',
-  klines: (symbol: string, interval: string, limit: number) =>
-    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-  tickers: () => `https://api.binance.com/api/v3/ticker/24hr`,
+  id: 'BINANCE' as ExchangeID,
+  spot: {
+    klines: (symbol: string, interval: string, limit: number) =>
+      `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+    tickers: `https://api.binance.com/api/v3/ticker/24hr`,
+  },
+  futures: {
+    klines: (symbol: string, interval: string, limit: number) =>
+      `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+    tickers: `https://fapi.binance.com/fapi/v1/ticker/24hr`,
+  }
 };
+
 const MEXC = {
-  id: 'MEXC',
-  klines: (symbol: string, interval: string, limit: number) =>
-    `https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
-  tickers: () => `https://api.mexc.com/api/v3/ticker/24hr`,
+  id: 'MEXC' as ExchangeID,
+  spot: {
+    klines: (symbol: string, interval: string, limit: number) =>
+      `https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`,
+    tickers: `https://api.mexc.com/api/v3/ticker/24hr`,
+  },
+  futures: {
+    // Klines require BTC_USDT + Min5/Hour1 etc; we map symbol & interval later.
+    klines: (pairUnderscore: string, ivCode: string, limit: number) =>
+      `https://contract.mexc.com/api/v1/contract/kline?symbol=${pairUnderscore}&interval=${ivCode}&limit=${limit}`,
+    altKlines: (pairUnderscore: string, ivCode: string, limit: number) =>
+      `https://contract.mexc.com/api/v1/contract/kline/${pairUnderscore}?interval=${ivCode}&limit=${limit}`,
+    tickers: `https://contract.mexc.com/api/v1/contract/ticker`,
+  }
 };
 
 function isUsdtSym(sym: string) {
+  // Exclude leveraged tokens patterns on spot; for futures this is typically fine as-is
   return sym.endsWith('USDT') && !sym.includes('UP') && !sym.includes('DOWN') && !sym.includes('BULL') && !sym.includes('BEAR');
 }
 
 type Ticker = { symbol: string; lastPrice: number; quoteVolume: number };
 
-async function getTickers(exchange: typeof BINANCE | typeof MEXC): Promise<Ticker[]> {
+async function getTickers(ex: typeof BINANCE | typeof MEXC, market: Market): Promise<Ticker[]> {
   try {
-    const data = await fetchJson(exchange.tickers(), 6000);
-    return (data as any[]).map(d => ({
-      symbol: d.symbol as string,
-      lastPrice: Number((d as any).lastPrice ?? (d as any).c ?? (d as any).last ?? 0),
-      quoteVolume: Number((d as any).quoteVolume ?? (d as any).q ?? (d as any).volume ?? 0),
-    }));
+    if (ex.id === 'BINANCE') {
+      const url = market === 'spot' ? ex.spot.tickers : ex.futures.tickers;
+      const arr = await fetchJson(url, 7000) as any[];
+      return arr.map(d => ({
+        symbol: String(d.symbol),
+        lastPrice: Number(d.lastPrice ?? d.c ?? d.last ?? 0),
+        quoteVolume: Number(d.quoteVolume ?? d.q ?? d.volume ?? 0),
+      }));
+    } else {
+      if (market === 'spot') {
+        const arr = await fetchJson(ex.spot.tickers, 7000) as any[];
+        return arr.map(d => ({
+          symbol: String(d.symbol),
+          lastPrice: Number(d.lastPrice ?? d.c ?? d.last ?? 0),
+          quoteVolume: Number(d.quoteVolume ?? d.q ?? d.volume ?? 0),
+        }));
+      }
+      // futures: contract ticker returns { data: [...] } with symbol: 'BTC_USDT'
+      const d = await fetchJson(ex.futures.tickers, 8000) as any;
+      const arr = Array.isArray(d?.data) ? d.data : [];
+      return arr.map((t: any) => {
+        const raw = String(t?.symbol || '');              // BTC_USDT
+        const sym = raw.endsWith('_USDT') ? raw.replace('_', '') : raw; // BTCUSDT
+        const price = Number(t?.lastPrice ?? t?.fairPrice ?? t?.indexPrice ?? 0);
+        const qv = Number(t?.turnover24h ?? t?.turnover ?? t?.amount24h ?? t?.quoteVolume ?? t?.volume ?? 0);
+        return { symbol: sym, lastPrice: price, quoteVolume: qv };
+      });
+    }
   } catch {
-    // graceful fallback
     return [];
   }
 }
 
 async function getKlines(
-  exchange: typeof BINANCE | typeof MEXC,
+  ex: typeof BINANCE | typeof MEXC,
+  market: Market,
   symbol: string,
   interval: string,
   limit: number
 ) {
-  const raw = await fetchJson(exchange.klines(symbol, interval, limit), 6000) as any[];
-  const o: number[] = [], h: number[] = [], l: number[] = [], c: number[] = [], v: number[] = [], t: number[] = [];
-  for (const k of raw) {
-    o.push(Number(k[1])); h.push(Number(k[2])); l.push(Number(k[3])); c.push(Number(k[4])); v.push(Number(k[5])); t.push(Number(k[0]));
+  if (ex.id === 'BINANCE') {
+    const url = market === 'spot'
+      ? ex.spot.klines(symbol, interval, limit)
+      : ex.futures.klines(symbol, interval, limit);
+    const raw = await fetchJson(url, 7000) as any[];
+    const o: number[] = [], h: number[] = [], l: number[] = [], c: number[] = [], v: number[] = [], t: number[] = [];
+    for (const k of raw) {
+      o.push(Number(k[1])); h.push(Number(k[2])); l.push(Number(k[3])); c.push(Number(k[4])); v.push(Number(k[5])); t.push(Number(k[0]));
+    }
+    return { o, h, l, c, v, t };
   }
-  return { o, h, l, c, v, t };
+
+  // MEXC
+  if (market === 'spot') {
+    const raw = await fetchJson(ex.spot.klines(symbol, interval, limit), 7000) as any[];
+    const o: number[] = [], h: number[] = [], l: number[] = [], c: number[] = [], v: number[] = [], t: number[] = [];
+    for (const k of raw) {
+      o.push(Number(k[1])); h.push(Number(k[2])); l.push(Number(k[3])); c.push(Number(k[4])); v.push(Number(k[5])); t.push(Number(k[0]));
+    }
+    return { o, h, l, c, v, t };
+  } else {
+    // futures
+    const pair = symbol.endsWith('USDT') ? symbol.replace('USDT', '_USDT') : symbol;
+    const iv = (MEXC_FUTURES_MAP as any)[interval] || 'Min1';
+    // Primary
+    let data: any;
+    try {
+      const d = await fetchJson(ex.futures.klines(pair, iv, limit), 8000);
+      data = Array.isArray(d?.data) ? d.data : d;
+    } catch {
+      const d = await fetchJson(ex.futures.altKlines(pair, iv, limit), 8000);
+      data = Array.isArray(d?.data) ? d.data : d;
+    }
+    const o: number[] = [], h: number[] = [], l: number[] = [], c: number[] = [], v: number[] = [], t: number[] = [];
+    for (const k of (Array.isArray(data) ? data : [])) {
+      t.push(Number(k[0])); o.push(Number(k[1])); h.push(Number(k[2])); l.push(Number(k[3])); c.push(Number(k[4])); v.push(Number(k[5]));
+    }
+    return { o, h, l, c, v, t };
+  }
 }
 
 function topUsdtFrom(ticks: Ticker[], limit: number) {
@@ -162,17 +243,16 @@ function topUsdtFrom(ticks: Ticker[], limit: number) {
     .map(t => t.symbol);
 }
 
-async function buildUniverse(maxPerExchange = 36) {
-  const [bt, mt] = await Promise.all([getTickers(BINANCE), getTickers(MEXC)]);
+async function buildUniverse(market: Market, maxPerExchange = 36) {
+  const [bt, mt] = await Promise.all([getTickers(BINANCE, market), getTickers(MEXC, market)]);
   const bSet = new Set(bt.filter(t => isUsdtSym(t.symbol)).map(t => t.symbol));
   const mSet = new Set(mt.filter(t => isUsdtSym(t.symbol)).map(t => t.symbol));
   const common = [...bSet].filter(s => mSet.has(s));
 
   if (common.length > 0) {
-    // rank by combined quote vol
     const volMap = new Map<string, number>();
-    for (const t of bt) if (bSet.has(t.symbol)) volMap.set(t.symbol, (volMap.get(t.symbol) ?? 0) + t.quoteVolume);
-    for (const t of mt) if (mSet.has(t.symbol)) volMap.set(t.symbol, (volMap.get(t.symbol) ?? 0) + t.quoteVolume);
+    for (const t of bt) if (bSet.has(t.symbol)) volMap.set(t.symbol, (volMap.get(t.symbol) ?? 0) + (t.quoteVolume || 0));
+    for (const t of mt) if (mSet.has(t.symbol)) volMap.set(t.symbol, (volMap.get(t.symbol) ?? 0) + (t.quoteVolume || 0));
     return common
       .map(s => ({ s, v: volMap.get(s) ?? 0 }))
       .sort((a, b) => b.v - a.v)
@@ -183,11 +263,12 @@ async function buildUniverse(maxPerExchange = 36) {
   // no intersection available, fallback to whichever responded
   if (bt.length) return topUsdtFrom(bt, maxPerExchange);
   if (mt.length) return topUsdtFrom(mt, maxPerExchange);
-  return []; // last resort
+  return [];
 }
 
 type EvalOut = {
-  exchange: string;
+  exchange: ExchangeID;
+  market: Market;
   symbol: string;
   side: 'LONG' | 'SHORT' | 'NEUTRAL';
   confidencePercent: number;
@@ -202,11 +283,12 @@ type EvalOut = {
 
 function evaluateSymbol(args: {
   exchange: typeof BINANCE | typeof MEXC;
+  market: Market;
   symbol: string;
   series: { o: number[]; h: number[]; l: number[]; c: number[]; v: number[]; t: number[] };
   meta: { quoteVolume?: number };
 }): EvalOut | null {
-  const { exchange, symbol, series, meta } = args;
+  const { exchange, market, symbol, series, meta } = args;
   const { h, l, c, v } = series;
   const price = last(c);
   const ema20 = ema(c, 20);
@@ -268,11 +350,12 @@ function evaluateSymbol(args: {
     trendLong ? 'EMA20 above EMA50 and price above EMAs' : 'EMA20 below EMA50 and price below EMAs',
     momLong ? 'RSI and MACD momentum up' : 'RSI and MACD momentum down',
     vwapLong ? 'Holding above VWAP' : 'Trading below VWAP',
-    `ATR ${(atrPct * 100).toFixed(2)} percent gives risk estimate`
+    `ATR ${(atrPct * 100).toFixed(2)}% gives risk estimate`
   ].join(' | ');
 
   return {
     exchange: exchange.id,
+    market,
     symbol,
     side: dir,
     confidencePercent,
@@ -306,20 +389,20 @@ async function mapPool<T, R>(items: T[], limit: number, fn: (item: T, idx: numbe
   return ret;
 }
 
-async function buildTickerMaps() {
-  const [bt, mt] = await Promise.all([getTickers(BINANCE), getTickers(MEXC)]);
+async function buildTickerMaps(market: Market) {
+  const [bt, mt] = await Promise.all([getTickers(BINANCE, market), getTickers(MEXC, market)]);
   const bMap = new Map(bt.map(t => [t.symbol, t]));
   const mMap = new Map(mt.map(t => [t.symbol, t]));
   return { BINANCE: bMap, MEXC: mMap } as const;
 }
 
-async function evaluateBoth(symbol: string, interval: string, limit: number, tmap: Awaited<ReturnType<typeof buildTickerMaps>>) {
+async function evaluateBoth(symbol: string, market: Market, interval: string, limit: number, tmap: Awaited<ReturnType<typeof buildTickerMaps>>) {
   const out: ReturnType<typeof evaluateSymbol>[] = [];
   for (const ex of [BINANCE, MEXC] as const) {
     try {
-      const series = await getKlines(ex, symbol, interval, limit);
+      const series = await getKlines(ex, market, symbol, interval, limit);
       const meta = (ex.id === 'BINANCE' ? tmap.BINANCE : tmap.MEXC).get(symbol) || {};
-      const res = evaluateSymbol({ exchange: ex, symbol, series, meta });
+      const res = evaluateSymbol({ exchange: ex, market, symbol, series, meta });
       if (res && res.side !== 'NEUTRAL') out.push(res);
       await sleep(40);
     } catch {
@@ -329,25 +412,45 @@ async function evaluateBoth(symbol: string, interval: string, limit: number, tma
   return out.filter(Boolean) as EvalOut[];
 }
 
-export async function scanOnce(opts?: { interval?: string; lookback?: number; maxPerExchange?: number }) {
-  const interval = opts?.interval ?? '1m';
+async function scanMarket(market: Market, opts?: { interval?: string; lookback?: number; maxPerExchange?: number }) {
+  const interval = opts?.interval ?? '5m';
   const lookback = Math.max(120, Math.min(opts?.lookback ?? 150, 200));
   const maxPerExchange = Math.max(24, Math.min(opts?.maxPerExchange ?? 36, 48));
 
-  const [universe, tmap] = await Promise.all([buildUniverse(maxPerExchange), buildTickerMaps()]);
-
-  const evaluated = await mapPool(universe, 4, async (sym) => evaluateBoth(sym, interval, lookback, tmap));
+  const [universe, tmap] = await Promise.all([buildUniverse(market, maxPerExchange), buildTickerMaps(market)]);
+  const evaluated = await mapPool(universe, 4, async (sym) => evaluateBoth(sym, market, interval, lookback, tmap));
   const all = evaluated.flat();
 
   all.sort((a, b) => b.confidencePercent - a.confidencePercent || a.riskPercent - b.riskPercent);
-  const picks = all.slice(0, 3);
+  return { universe, candidates: all };
+}
 
+export async function scanOnce(opts?: { market?: Market | 'both'; interval?: string; lookback?: number; maxPerExchange?: number }) {
+  const market = (opts?.market ?? 'spot') as Market | 'both';
+
+  if (market === 'both') {
+    const [spot, fut] = await Promise.all([scanMarket('spot', opts), scanMarket('futures', opts)]);
+    const combined = [...spot.candidates, ...fut.candidates];
+    combined.sort((a, b) => b.confidencePercent - a.confidencePercent || a.riskPercent - b.riskPercent);
+    const picks = combined.slice(0, 3);
+    return {
+      ranAt: new Date().toISOString(),
+      interval: opts?.interval ?? '5m',
+      lookback: Math.max(120, Math.min(opts?.lookback ?? 150, 200)),
+      universeCount: (spot.universe?.length ?? 0) + (fut.universe?.length ?? 0),
+      candidatesCount: combined.length,
+      picks: picks.length ? picks : [{ side: 'WAIT', note: 'No qualified opportunities by current gates' }],
+    };
+  }
+
+  const { universe, candidates } = await scanMarket(market as Market, opts);
+  const picks = candidates.slice(0, 3);
   return {
     ranAt: new Date().toISOString(),
-    interval,
-    lookback,
+    interval: opts?.interval ?? '5m',
+    lookback: Math.max(120, Math.min(opts?.lookback ?? 150, 200)),
     universeCount: universe.length,
-    candidatesCount: all.length,
+    candidatesCount: candidates.length,
     picks: picks.length ? picks : [{ side: 'WAIT', note: 'No qualified opportunities by current gates' }],
   };
 }
