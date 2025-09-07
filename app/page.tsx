@@ -1,3 +1,4 @@
+// app/page.tsx
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -20,14 +21,8 @@ const quotesFor = (p: QuotePreset) =>
   ['USDT','USDC','FDUSD','TUSD'];
 
 type Signal = {
-  label: string;
-  confidence: number;
-  entry: number;
-  sl: number;
-  tp: number;
-  riskPct: number;
-  riskBand: string;
-  reasons: string[];
+  label: string; confidence: number; entry: number; sl: number; tp: number;
+  riskPct: number; riskBand: string; reasons: string[];
 };
 
 type Config = {
@@ -54,32 +49,31 @@ const DEFAULT_CONFIG: Config = {
   },
 };
 
-const ALL_TFS = ['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w'] as const;
+const ALL_TFS = ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w"] as const;
 
 /* helpers for fallback signal text */
 const ema = (arr: number[], p: number) => {
   if (!arr.length) return [];
-  const k = 2 / (p + 1);
-  const out: number[] = [];
-  let prev = arr[0];
-  for (let i = 0; i < arr.length; i++) {
-    const v = Number(arr[i]);
-    out.push(i ? v * k + prev * (1 - k) : prev);
-    prev = out[i];
-  }
+  const k = 2 / (p + 1); const out: number[] = []; let prev = arr[0];
+  for (let i = 0; i < arr.length; i++) { const v = Number(arr[i]); out.push(i ? v * k + prev * (1 - k) : prev); prev = out[i]; }
   return out;
 };
 const rsi = (c: number[], p = 14) => {
   if (c.length < p + 2) return Array(c.length).fill(null) as (number | null)[];
   let g = 0, l = 0;
-  for (let i = 1; i <= p; i++) { const d = c[i] - c[i - 1]; if (d >= 0) g += d; else l -= d; }
+  for (let i = 1; i <= p; i++) {
+    const d = c[i] - c[i - 1];
+    if (d >= 0) g += d; else l -= d;
+  }
   let ag = g / p, al = l / p;
   const out: (number | null)[] = Array(p).fill(null);
   out.push(100 - 100 / (1 + (ag / (al || 1e-12))));
   for (let i = p + 1; i < c.length; i++) {
-    const d = c[i] - c[i - 1]; const ga = Math.max(d, 0), lo = Math.max(-d, 0);
-    ag = (ag * (p - 1) + ga) / p; al = (al * (p - 1) + lo) / p;
-    out.push(100 - 100 / (1 + (ag / (al || 1e-12)))));
+    const d = c[i] - c[i - 1];
+    const ga = Math.max(d, 0), lo = Math.max(-d, 0);
+    ag = (ag * (p - 1) + ga) / p;
+    al = (al * (p - 1) + lo) / p;
+    out.push(100 - 100 / (1 + (ag / (al || 1e-12))));
   }
   while (out.length < c.length) out.unshift(null);
   return out;
@@ -112,12 +106,7 @@ export default function Page() {
 
   const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 });
   const sessionRef = useRef(0);
-  useEffect(() => {
-    sessionRef.current += 1;
-    setLivePrice(null);
-    setSignal(null);
-    setFallback(null);
-  }, [exchange, market, symbol, interval]);
+  useEffect(() => { sessionRef.current += 1; setLivePrice(null); setSignal(null); setFallback(null); }, [exchange, market, symbol, interval]);
 
   // symbols by exchange/market/quotes
   useEffect(() => {
@@ -234,9 +223,7 @@ export default function Page() {
           reasons:['Low-confidence candidate (no confirm)','Based on EMA bias + S/R room'],
           support, resistance, rsi: Number((r ?? 0).toFixed(2)), ema20, ema50
         });
-      } catch {
-        if (!cancelled) setFallback(null);
-      }
+      } catch { if (!cancelled) setFallback(null); }
     })();
     return () => { cancelled = true; };
   }, [exchange, symbol, interval]);
@@ -246,11 +233,8 @@ export default function Page() {
   }
   const ov = cfg.overlays;
   const ToolbarBtn = ({ label, active, onClick, title }: { label: string; active?: boolean; onClick: () => void; title?: string }) => (
-    <button
-      title={title}
-      onClick={onClick}
-      className={`w-full rounded-lg border border-neutral-900 py-2 text-lg hover:bg-neutral-900 ${active ? 'bg-neutral-900' : ''}`}
-    >
+    <button title={title} onClick={onClick}
+      className={`w-full rounded-lg border border-neutral-900 py-2 text-lg hover:bg-neutral-900 ${active ? 'bg-neutral-900' : ''}`}>
       {label}
     </button>
   );
@@ -277,16 +261,11 @@ export default function Page() {
             </select>
           </div>
           <div className="flex items-center gap-2">
-            <select
-              value={interval}
-              onChange={(e)=>setInterval(e.target.value as typeof ALL_TFS[number])}
-              className="rounded bg-[#0e0f12] px-2 py-1 text-sm border border-neutral-800"
-            >
+            <select value={interval} onChange={(e)=>setInterval(e.target.value as typeof ALL_TFS[number])}
+              className="rounded bg-[#0e0f12] px-2 py-1 text-sm border border-neutral-800">
               {ALL_TFS.map(tf => <option key={tf} value={tf}>{tf}</option>)}
             </select>
-            <button onClick={()=>setShowInd(v=>!v)} className="rounded border border-neutral-800 px-2 py-1 text-sm hover:bg-neutral-900">
-              Indicators
-            </button>
+            <button onClick={()=>setShowInd(v=>!v)} className="rounded border border-neutral-800 px-2 py-1 text-sm hover:bg-neutral-900">Indicators</button>
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-2">
             <select value={exchange} onChange={(e)=>setExchange(e.target.value as Exchange)}
@@ -384,13 +363,13 @@ export default function Page() {
             lastSignal={lastForPanel}
           />
 
-          {/* Top Signals — clicking a pick updates exchange/market/symbol and seeds DemoTradePanel */}
+          {/* Top Signals — filter by current exchange/market & chosen interval.
+              Clicking a pick updates exchange/market/symbol and seeds DemoTradePanel. */}
           <TopSignals
             interval={interval}
-            exchange={exchange as any}
-            market={market as any}
+            exchange={exchange as any}   // 'binance' | 'mexc' | 'both' accepted
+            market={market as any}       // 'spot' | 'futures' | 'both' accepted
             mode="strong"
-            source="engine"
             onSelect={(p: SignalPick) => {
               setExchange(p.exchange as Exchange);
               setMarket(p.market as Market);
