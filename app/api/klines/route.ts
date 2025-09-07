@@ -10,11 +10,22 @@ export const dynamic = "force-dynamic";
 type Market = "spot" | "futures";
 type Exchange = "binance" | "mexc";
 
-// duration for closeTime slot
+// interval durations for closeTime
 const DURATION_MS: Record<string, number> = {
-  "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
-  "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "6h": 21_600_000,
-  "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000
+  "1m": 60_000,
+  "3m": 180_000,
+  "5m": 300_000,
+  "15m": 900_000,
+  "30m": 1_800_000,
+  "1h": 3_600_000,
+  "2h": 7_200_000,
+  "4h": 14_400_000,
+  "6h": 21_600_000,
+  "8h": 28_800_000,
+  "12h": 43_200_000,
+  "1d": 86_400_000,
+  "3d": 259_200_000,
+  "1w": 604_800_000,
 };
 
 async function j(url: string) {
@@ -38,13 +49,13 @@ export async function GET(req: Request) {
 
     const cacheHdr = { "cache-control": "no-store" };
 
-    // Binance spot
+    // BINANCE spot
     if (exchange === "binance" && market === "spot") {
       const raw = await j(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
       return NextResponse.json({ candles: raw }, { headers: cacheHdr });
     }
 
-    // Binance futures
+    // BINANCE futures
     if (exchange === "binance" && market === "futures") {
       const raw = await j(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
       return NextResponse.json({ candles: raw }, { headers: cacheHdr });
@@ -53,6 +64,7 @@ export async function GET(req: Request) {
     // MEXC spot
     if (exchange === "mexc" && market === "spot") {
       const raw = await j(`https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+      // Already shaped like Binance
       return NextResponse.json({ candles: raw }, { headers: cacheHdr });
     }
 
@@ -60,19 +72,28 @@ export async function GET(req: Request) {
     if (exchange === "mexc" && market === "futures") {
       const pair = symbol.endsWith("USDT") ? symbol.replace("USDT", "_USDT") : symbol; // BTCUSDT -> BTC_USDT
       const iv = MEXC_FUTURES_MAP[interval as keyof typeof MEXC_FUTURES_MAP] || "Min1";
-      const raw = await j(`https://contract.mexc.com/api/v1/contract/kline?symbol=${pair}&interval=${iv}&limit=${limit}`);
-      const arr = Array.isArray((raw as any)?.data) ? (raw as any).data : raw;
+
+      // Primary endpoint (query params form)
+      let data: any;
+      try {
+        const d = await j(`https://contract.mexc.com/api/v1/contract/kline?symbol=${pair}&interval=${iv}&limit=${limit}`);
+        data = Array.isArray(d?.data) ? d.data : d;
+      } catch {
+        // Fallback (path param form)
+        const d = await j(`https://contract.mexc.com/api/v1/contract/kline/${pair}?interval=${iv}&limit=${limit}`);
+        data = Array.isArray(d?.data) ? d.data : d;
+      }
 
       const ms = DURATION_MS[interval] ?? 60_000;
-      const candles = arr.map((c: any[]) => {
-        // format to Binance shape [openTime, open, high, low, close, volume, closeTime, ...]
+      const candles = (Array.isArray(data) ? data : []).map((c: any[]) => {
+        // MEXC returns [time, open, high, low, close, volume] (time in ms)
         const t  = Number(c[0]);
         const o  = Number(c[1]);
         const h  = Number(c[2]);
         const l  = Number(c[3]);
         const cl = Number(c[4]);
         const v  = Number(c[5]);
-        return [t, o, h, l, cl, v, t + ms, 0, 0, 0, 0, 0];
+        return [t, o, h, l, cl, v, t + ms, 0, 0, 0, 0, 0]; // Binance-shaped
       });
 
       return NextResponse.json({ candles }, { headers: cacheHdr });
