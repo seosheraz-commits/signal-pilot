@@ -1,3 +1,4 @@
+// app/page.tsx
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -5,7 +6,7 @@ import dynamic from 'next/dynamic';
 import { listSymbols, type Exchange, type Market } from '../lib/symbols';
 import Watchlist from '../components/Watchlist';
 import DemoTradePanel from '../components/DemoTradePanel';
-import TopSignals from '../components/TopSignals';
+import TopSignals, { type Pick as SignalPick } from '../components/TopSignals';
 import IndicatorManager from '../components/IndicatorManager';
 
 const CandleChart = dynamic(() => import('../components/CandleChart'), { ssr: false });
@@ -94,6 +95,9 @@ export default function Page() {
   const [signal, setSignal] = useState<Signal | null>(null);
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [fallback, setFallback] = useState<Fallback | null>(null);
+
+  // also keep last pick from TopSignals to seed DemoTradePanel
+  const [lastPick, setLastPick] = useState<{ entry: number; stop: number; tp: number } | null>(null);
 
   const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 });
   const sessionRef = useRef(0);
@@ -232,6 +236,14 @@ export default function Page() {
 
   const sess = sessionRef.current;
 
+  // Prefer precise trade levels for DemoTradePanel:
+  const lastForPanel = useMemo(() => {
+    if (signal) return { entry: signal.entry, sl: signal.sl, tp: signal.tp };
+    if (lastPick) return { entry: lastPick.entry, sl: lastPick.stop, tp: lastPick.tp };
+    if (fallback) return { entry: fallback.entry, sl: fallback.sl, tp: fallback.tp };
+    return null;
+  }, [signal, lastPick, fallback]);
+
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-[#fefce8]">
       {/* HEADER */}
@@ -336,15 +348,31 @@ export default function Page() {
             )}
           </section>
 
+          {/* Demo Trade Panel uses either the live signal, last TopSignals pick, or the fallback */}
           <DemoTradePanel
             key={`${exchange}-${market}-${symbol}`}
-            symbol={symbol}
             exchange={exchange}
+            market={market}
+            symbol={symbol}
             livePrice={livePrice}
-            lastSignal={signal}
+            lastSignal={lastForPanel}
           />
 
-          <TopSignals interval={interval} onSelect={setSymbol} defaultMode="strong" />
+          {/* Top Signals — filter by current exchange/market & chosen interval.
+              Clicking a pick updates exchange/market/symbol and seeds DemoTradePanel. */}
+          <TopSignals
+            interval={interval}
+            exchange={exchange as any}   // 'binance' | 'mexc' | 'both' accepted
+            market={market as any}       // 'spot' | 'futures' | 'both' accepted
+            mode="strong"
+            onSelect={(p: SignalPick) => {
+              setExchange(p.exchange as Exchange);
+              setMarket(p.market as Market);
+              setSymbol(p.symbol);
+              setLastPick({ entry: p.entry, stop: p.stop, tp: p.tp });
+              // optionally scroll to DemoTradePanel or highlight it
+            }}
+          />
         </main>
 
         {/* RIGHT */}
