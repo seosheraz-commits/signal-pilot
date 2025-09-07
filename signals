@@ -1,0 +1,23 @@
+/signals
+  /config
+    signalConfig.js
+  /indicators
+    sma.js
+    std.js
+    ema.js
+    rsi.js
+    atr.js
+    macd.js
+    adx.js
+    vwap.js
+    bollinger.js
+  /strategy
+    patterns.js
+    htfBias.js
+    signalEngine.js
+    scanAll.js
+  /runtime
+    wire.js
+  /examples
+    binanceQuickDemo.js
+    mexcQuickNote.md

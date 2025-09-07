@@ -1,0 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Optional: a tiny reset + dark bg so you can see styling immediately */
+html, body { height: 100%; }
+body { background: #0a0a0a; color: #e5e7eb; }
