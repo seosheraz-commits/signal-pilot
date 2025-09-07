@@ -1,17 +1,17 @@
 // app/api/engine/scan/route.ts
-import { NextResponse } from "next/server";
-import { scanOnce } from "@/src/engine";
+import { NextResponse } from 'next/server';
+import { scanOnce } from '@/src/engine';
 
-export const runtime = "nodejs";
-export const preferredRegion = "sin1";
-export const dynamic = "force-dynamic";
+export const runtime = 'nodejs';
+export const preferredRegion = 'sin1';
+export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 type PickOut = {
-  exchange: "binance" | "mexc";
-  market: "spot";              // this engine scans spot tickers
+  exchange: 'binance' | 'mexc';
+  market: 'spot' | 'futures';
   symbol: string;
-  side: "long" | "short";
+  side: 'long' | 'short';
   confidencePercent: number;
   riskPercent: number;
   entry: number;
@@ -23,30 +23,35 @@ type PickOut = {
 export async function GET(req: Request) {
   try {
     const u = new URL(req.url);
-    const interval = (u.searchParams.get("interval") || "5m").toLowerCase();
-    const lookback = Math.max(120, Math.min(parseInt(u.searchParams.get("lookback") || "150", 10), 200));
-    const maxPerExchange = Math.max(24, Math.min(parseInt(u.searchParams.get("max") || "36", 10), 48));
+    const interval = (u.searchParams.get('interval') || '5m').toLowerCase();
+    const marketQ = (u.searchParams.get('market') || 'spot').toLowerCase();
+    const market = marketQ === 'both' ? 'both' : marketQ === 'futures' ? 'futures' : 'spot';
+    const lookback = Math.max(120, Math.min(parseInt(u.searchParams.get('lookback') || '150', 10), 200));
+    const maxPerExchange = Math.max(24, Math.min(parseInt(u.searchParams.get('max') || '36', 10), 48));
 
-    const out = await scanOnce({ interval, lookback, maxPerExchange });
+    const out = await scanOnce({ market: market as any, interval, lookback, maxPerExchange });
 
     const picks: PickOut[] = (Array.isArray(out?.picks) ? out.picks : [])
       .map((p: any) => {
-        const ex = String(p?.exchange || "").toLowerCase();
-        const exchange: "binance" | "mexc" = ex.includes("mexc") ? "mexc" : "binance";
-        const side = String(p?.side || "").toLowerCase();
-        if (side !== "long" && side !== "short") return null;
+        const ex = String(p?.exchange || '').toLowerCase();
+        const exchange: 'binance' | 'mexc' = ex.includes('mexc') ? 'mexc' : 'binance';
+        const sideStr = String(p?.side || '').toLowerCase();
+        const side = sideStr === 'short' ? 'short' : sideStr === 'long' ? 'long' : null;
+        if (!side) return null;
+
+        const mkt = String(p?.market || '').toLowerCase().includes('fut') ? 'futures' : 'spot';
 
         return {
           exchange,
-          market: "spot",
-          symbol: String(p.symbol || ""),
+          market: mkt,
+          symbol: String(p.symbol || ''),
           side,
           confidencePercent: Number(p.confidencePercent ?? 60),
           riskPercent: Number(p.riskPercent ?? 2.5),
           entry: Number(p.entry ?? p.price ?? 0),
           stop: Number(p.stop ?? p.stopLoss ?? 0),
           tp: Number(p.takeProfit ?? p.tp ?? 0),
-          reason: String(p.reasoning ?? p.reason ?? "engine"),
+          reason: String(p.reasoning ?? p.reason ?? 'engine'),
         } as PickOut;
       })
       .filter(Boolean) as PickOut[];
@@ -56,11 +61,12 @@ export async function GET(req: Request) {
         picks: picks.slice(0, 3),
         scanned: out?.universeCount ?? 0,
         interval: out?.interval ?? interval,
+        market,
         engine: true,
       },
-      { headers: { "cache-control": "no-store" } }
+      { headers: { 'cache-control': 'no-store' } }
     );
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "failed" }, { status: 500 });
+    return NextResponse.json({ error: e?.message || 'failed' }, { status: 500 });
   }
 }
