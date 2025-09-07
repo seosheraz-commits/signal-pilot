@@ -1,6 +1,6 @@
 // app/api/engine/scan/route.ts
 import { NextResponse } from 'next/server';
-import { scanOnce } from '@/src/engine'; // <— use alias
+import { scanOnce } from '../../../../src/engine'; // <-- 4 dots up
 
 export const runtime = 'nodejs';
 export const preferredRegion = 'sin1';
