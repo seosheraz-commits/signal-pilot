@@ -1,3 +1,4 @@
+// components/DemoTradePanel.tsx
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -12,25 +13,25 @@ type OpenPos = {
   qty: number;
   sl: number;
   tp: number;
-  fee: number;
-  t: number;
+  fee: number; // taker fee per side (e.g., 0.0004 = 0.04%)
+  t: number;   // opened at
 };
 
 type LastSignal = { entry?: number; sl?: number; tp?: number } | null;
 
 type Props = {
-  // If you pass these, they seed the selectors. You can also let the panel handle selection itself.
+  // Optional seeds from parent; panel still lets user change them
   symbol?: string;
   exchange?: Exchange;
   market?: Market;
 
-  // If you already compute live price outside, pass it. If not, the panel will poll its own live price.
+  // Optional live price from parent; if omitted the panel polls /api/ticker
   livePrice?: number | null;
 
-  // Optional signal to prefill entry, SL, TP%
+  // Optional signal to prefill entry / SL / TP
   lastSignal?: LastSignal;
 
-  // Lift state up if you want
+  // Optional lifter
   onState?: (s: {
     exchange: Exchange;
     market: Market;
@@ -53,37 +54,39 @@ type SymbolRow = {
 };
 
 export default function DemoTradePanel(p: Props) {
-  // Selectors — seed from props, keep editable locally
+  // Selectors (seed from props)
   const [exchange, setExchange] = useState<Exchange>(p.exchange || 'binance');
   const [market, setMarket] = useState<Market>(p.market || 'futures');
   const [symbol, setSymbol] = useState<string>(p.symbol || 'BTCUSDT');
 
-  // Universe
+  // Universe list
   const [universe, setUniverse] = useState<SymbolRow[]>([]);
   const [loadingList, setLoadingList] = useState(false);
   const [search, setSearch] = useState('');
 
-  // Live price — prefer prop, else poll via klines
+  // Live price
   const [live, setLive] = useState<number | null>(p.livePrice ?? null);
 
-  // Trade planning
+  // Trading inputs
   const [entry, setEntry] = useState(0);
   const [margin, setMargin] = useState(30);
   const [lev, setLev] = useState(30);
   const [fee, setFee] = useState(0.0004); // taker per side
   const [slPct, setSlPct] = useState(10);
   const [tpPct, setTpPct] = useState(10);
+
+  // Position + UI
   const [pos, setPos] = useState<OpenPos | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
   const userChangedEntry = useRef(false);
 
-  // Keep selectors in sync if parent changes props
+  // Keep in sync if parent changes seeds
   useEffect(() => { if (p.exchange && p.exchange !== exchange) setExchange(p.exchange); }, [p.exchange]);
   useEffect(() => { if (p.market && p.market !== market) setMarket(p.market); }, [p.market]);
   useEffect(() => { if (p.symbol && p.symbol !== symbol) setSymbol(p.symbol); }, [p.symbol]);
 
-  // Load combined symbol list once
+  // Load combined symbol list (Binance+MEXC, Spot+Futures) from your /api/symbols
   useEffect(() => {
     let gone = false;
     const run = async () => {
@@ -93,7 +96,7 @@ export default function DemoTradePanel(p: Props) {
         const d = await r.json();
         const rows: SymbolRow[] = Array.isArray(d.symbols) ? d.symbols : [];
         const usdt = rows.filter(x => x.quote === 'USDT' && String(x.status || '').toUpperCase() !== 'OFFLINE');
-        // Dedup by exchange+market+symbol
+        // Dedup key
         const key = (x: SymbolRow) => `${x.exchange}:${x.market}:${x.symbol}`;
         const map = new Map<string, SymbolRow>();
         for (const s of usdt) map.set(key(s), s);
@@ -108,44 +111,18 @@ export default function DemoTradePanel(p: Props) {
     return () => { gone = true; };
   }, []);
 
-  // Prefer lastSignal.entry then external live price then our own poll
+  // Prefer lastSignal.entry -> livePrice (prop) -> polled live
   useEffect(() => {
     if (userChangedEntry.current) return;
-    if (p.lastSignal?.entry) { setEntry(Number(p.lastSignal.entry)); return; }
+    if (p.lastSignal?.entry)      { setEntry(Number(p.lastSignal.entry)); return; }
     if (p.livePrice && p.livePrice > 0) { setEntry(Number(p.livePrice)); return; }
-    if (live && live > 0) { setEntry(live); return; }
+    if (live && live > 0)         { setEntry(live); return; }
   }, [symbol, p.lastSignal?.entry, p.livePrice, live]);
 
-  function onEntryEdit(v: string) { userChangedEntry.current = true; setEntry(Number(v) || 0); }
+  const onEntryEdit = (v: string) => { userChangedEntry.current = true; setEntry(Number(v) || 0); };
   useEffect(() => { userChangedEntry.current = false; }, [symbol, exchange, market]);
 
-  // Sync live from parent
-  useEffect(() => { if (p.livePrice !== undefined) setLive(p.livePrice ?? null); }, [p.livePrice]);
-
-  // Poll our own live price if parent did not provide one
-  useEffect(() => {
-    if (p.livePrice !== undefined) return; // parent controls it
-    let stop = false;
-    const poll = async () => {
-      try {
-        const url = `/api/klines?exchange=${exchange}&market=${market}&symbol=${symbol}&interval=1m&limit=1`;
-        const r = await fetch(url, { cache: 'no-store' });
-        const d = await r.json();
-        const candles = d?.candles;
-        if (Array.isArray(candles) && candles.length) {
-          const close = Number(candles[candles.length - 1][4]);
-          if (!Number.isNaN(close) && !stop) setLive(close);
-        }
-      } catch {
-        // ignore
-      }
-    };
-    poll();
-    const id = setInterval(poll, 2000);
-    return () => { stop = true; clearInterval(id); };
-  }, [exchange, market, symbol, p.livePrice]);
-
-  // Adapt SL/TP% from lastSignal if available
+  // Map lastSignal SL/TP into percentage sliders
   useEffect(() => {
     if (!p.lastSignal || !p.lastSignal.entry || !p.lastSignal.sl || !p.lastSignal.tp) return;
     const e = Number(p.lastSignal.entry);
@@ -155,6 +132,37 @@ export default function DemoTradePanel(p: Props) {
     if (tpp > 0.01) setTpPct(Number(tpp.toFixed(2)));
   }, [p.lastSignal?.entry, p.lastSignal?.sl, p.lastSignal?.tp]);
 
+  // Sync live from parent if provided
+  useEffect(() => { if (p.livePrice !== undefined) setLive(p.livePrice ?? null); }, [p.livePrice]);
+
+  // Poll our own live price using /api/ticker (fallback to klines if needed)
+  useEffect(() => {
+    if (p.livePrice !== undefined) return; // parent controls
+    let stop = false;
+    const poll = async () => {
+      try {
+        const url = `/api/ticker?exchange=${exchange}&market=${market}&symbol=${symbol}`;
+        const r = await fetch(url, { cache: 'no-store' });
+        const d = await r.json();
+        let price = Number(d?.price);
+        if (!Number.isFinite(price)) {
+          // fallback to klines last close
+          const k = await fetch(`/api/klines?exchange=${exchange}&market=${market}&symbol=${symbol}&interval=1m&limit=1`, { cache: 'no-store' });
+          const kd = await k.json();
+          const candles = kd?.candles;
+          if (Array.isArray(candles) && candles.length) price = Number(candles[candles.length - 1][4]);
+        }
+        if (!stop && Number.isFinite(price)) setLive(price);
+      } catch {
+        // ignore one-tick failures
+      }
+    };
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => { stop = true; clearInterval(id); };
+  }, [exchange, market, symbol, p.livePrice]);
+
+  // Derived values
   const notional = useMemo(() => margin * lev, [margin, lev]);
   const qty = useMemo(() => (entry > 0 ? notional / entry : 0), [notional, entry]);
 
@@ -163,19 +171,21 @@ export default function DemoTradePanel(p: Props) {
   const shortSL = useMemo(() => entry > 0 ? entry * (1 + slPct / 100) : 0, [entry, slPct]);
   const shortTP = useMemo(() => entry > 0 ? entry * (1 - tpPct / 100) : 0, [entry, tpPct]);
 
-  function pnlNow(pos: OpenPos, price: number) {
-    const gross = pos.side === 'LONG' ? (price - pos.entry) * pos.qty : (pos.entry - price) * pos.qty;
-    const fees = (pos.entry * pos.qty * pos.fee) + (price * pos.qty * pos.fee);
+  function pnlNow(op: OpenPos, price: number) {
+    const gross = op.side === 'LONG' ? (price - op.entry) * op.qty : (op.entry - price) * op.qty;
+    const fees = (op.entry * op.qty * op.fee) + (price * op.qty * op.fee);
     const pnlAbs = gross - fees;
     const pnlPct = notional > 0 ? (pnlAbs / notional) * 100 : 0;
     return { pnlAbs, pnlPct, fees };
   }
 
-  // Open and close
+  // Open/Close — entry is locked at the moment of opening
   function open(side: Side) {
-    if (!(entry > 0 && qty > 0)) { setNote('Set entry first.'); return; }
+    if (!(entry > 0 && qty > 0)) { setNote('Set entry (live) first.'); return; }
     const openPos: OpenPos = {
-      side, entry, qty,
+      side,
+      entry, // locked
+      qty,
       sl: side === 'LONG' ? longSL : shortSL,
       tp: side === 'LONG' ? longTP : shortTP,
       fee,
@@ -193,26 +203,20 @@ export default function DemoTradePanel(p: Props) {
     setPos(null);
   }
 
-  // Optional auto-close on SL/TP
+  // Optional auto-close on SL/TP touches
   useEffect(() => {
     if (!pos || !live) return;
-    if (pos.side === 'LONG' && (live <= pos.sl || live >= pos.tp)) {
-      closeAtLive();
-    }
-    if (pos.side === 'SHORT' && (live >= pos.sl || live <= pos.tp)) {
-      closeAtLive();
-    }
+    if (pos.side === 'LONG' && (live <= pos.sl || live >= pos.tp)) closeAtLive();
+    if (pos.side === 'SHORT' && (live >= pos.sl || live <= pos.tp)) closeAtLive();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live]);
 
   // Lift state up if requested
-  useEffect(() => {
-    p.onState?.({ exchange, market, symbol, live, pos });
-  }, [exchange, market, symbol, live, pos]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { p.onState?.({ exchange, market, symbol, live, pos }); }, [exchange, market, symbol, live, pos]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const posPnL = pos && live ? pnlNow(pos, live) : null;
 
-  // Filter list for current exchange+market and search
+  // Filter list by current exchange+market and search
   const filtered = useMemo(() => {
     const term = search.trim().toUpperCase();
     return universe
@@ -220,6 +224,14 @@ export default function DemoTradePanel(p: Props) {
       .filter(x => !term || x.symbol.includes(term))
       .sort((a, b) => a.symbol.localeCompare(b.symbol));
   }, [universe, exchange, market, search]);
+
+  // If exchange/market change and current symbol not in filtered, pick first available
+  useEffect(() => {
+    if (!filtered.length) return;
+    const exists = filtered.some(s => s.symbol === symbol);
+    if (!exists) setSymbol(filtered[0].symbol);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered.length, exchange, market]);
 
   return (
     <section className="rounded-xl border border-neutral-900 p-3">
@@ -231,6 +243,7 @@ export default function DemoTradePanel(p: Props) {
             value={exchange}
             onChange={(e) => setExchange(e.target.value as Exchange)}
             className="mt-1 w-full rounded bg-[#0e0f12] px-2 py-1"
+            disabled={!!pos}
           >
             <option value="binance">Binance</option>
             <option value="mexc">MEXC</option>
@@ -243,6 +256,7 @@ export default function DemoTradePanel(p: Props) {
             value={market}
             onChange={(e) => setMarket(e.target.value as Market)}
             className="mt-1 w-full rounded bg-[#0e0f12] px-2 py-1"
+            disabled={!!pos}
           >
             <option value="futures">Futures</option>
             <option value="spot">Spot</option>
@@ -257,6 +271,7 @@ export default function DemoTradePanel(p: Props) {
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search USDT pairs"
               className="w-full rounded bg-[#0e0f12] px-2 py-1"
+              disabled={!!pos}
             />
             <select
               value={`${exchange}:${market}:${symbol}`}
@@ -265,17 +280,14 @@ export default function DemoTradePanel(p: Props) {
                 setSymbol(sym);
               }}
               className="rounded bg-[#0e0f12] px-2 py-1 min-w-[180px]"
+              disabled={!!pos}
             >
               {loadingList && <option>Loading…</option>}
-              {!loadingList &&
-                filtered.map((s) => (
-                  <option
-                    key={`${s.exchange}:${s.market}:${s.symbol}`}
-                    value={`${s.exchange}:${s.market}:${s.symbol}`}
-                  >
-                    {s.symbol}
-                  </option>
-                ))}
+              {!loadingList && filtered.map((s) => (
+                <option key={`${s.exchange}:${s.market}:${s.symbol}`} value={`${s.exchange}:${s.market}:${s.symbol}`}>
+                  {s.symbol}
+                </option>
+              ))}
             </select>
           </div>
         </div>
@@ -292,14 +304,14 @@ export default function DemoTradePanel(p: Props) {
       {/* Planning row */}
       <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
         <div className="rounded-lg border border-neutral-800 p-3">
-          <div className="text-xs opacity-70">Entry</div>
+          <div className="text-xs opacity-70">Entry (locks on open)</div>
           <input
             value={entry ? String(entry) : ''}
             onChange={(e) => onEntryEdit(e.target.value)}
             placeholder="0.000000"
             className="mt-1 w-full rounded bg-[#0e0f12] px-2 py-1"
             inputMode="decimal"
-            disabled={!!pos} // lock while position is open
+            disabled={!!pos}
           />
         </div>
 
@@ -310,6 +322,7 @@ export default function DemoTradePanel(p: Props) {
             onChange={(e) => setMargin(Number(e.target.value) || 0)}
             className="mt-1 w-full rounded bg-[#0e0f12] px-2 py-1"
             inputMode="decimal"
+            disabled={!!pos}
           />
         </div>
 
@@ -320,6 +333,7 @@ export default function DemoTradePanel(p: Props) {
             onChange={(e) => setLev(Number(e.target.value) || 1)}
             className="mt-1 w-full rounded bg-[#0e0f12] px-2 py-1"
             inputMode="numeric"
+            disabled={!!pos}
           />
         </div>
 
@@ -330,6 +344,7 @@ export default function DemoTradePanel(p: Props) {
             onChange={(e) => setFee(Number(e.target.value) || 0)}
             className="mt-1 w-full rounded bg-[#0e0f12] px-2 py-1"
             inputMode="decimal"
+            disabled={!!pos}
           />
         </div>
 
@@ -341,6 +356,7 @@ export default function DemoTradePanel(p: Props) {
               onChange={(e) => setTpPct(Number(e.target.value) || 0)}
               className="w-full rounded bg-[#0e0f12] px-2 py-1"
               inputMode="decimal"
+              disabled={!!pos}
             />
             <span className="opacity-50">/</span>
             <input
@@ -348,6 +364,7 @@ export default function DemoTradePanel(p: Props) {
               onChange={(e) => setSlPct(Number(e.target.value) || 0)}
               className="w-full rounded bg-[#0e0f12] px-2 py-1"
               inputMode="decimal"
+              disabled={!!pos}
             />
           </div>
         </div>
@@ -373,13 +390,15 @@ export default function DemoTradePanel(p: Props) {
       <div className="mt-3 flex flex-wrap gap-3">
         <button
           onClick={() => open('LONG')}
-          className="rounded-lg bg-green-700 px-4 py-2 text-sm font-semibold hover:bg-green-600"
+          className="rounded-lg bg-green-700 px-4 py-2 text-sm font-semibold hover:bg-green-600 disabled:opacity-50"
+          disabled={!!pos}
         >
           Open Long
         </button>
         <button
           onClick={() => open('SHORT')}
-          className="rounded-lg bg-red-700 px-4 py-2 text-sm font-semibold hover:bg-red-600"
+          className="rounded-lg bg-red-700 px-4 py-2 text-sm font-semibold hover:bg-red-600 disabled:opacity-50"
+          disabled={!!pos}
         >
           Open Short
         </button>
