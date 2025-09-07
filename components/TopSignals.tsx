@@ -61,9 +61,7 @@ export default function TopSignals({
             data = d;
             usedSource = 'engine';
           }
-        } catch {
-          // swallow, we may fall back
-        }
+        } catch { /* fall back */ }
       }
 
       // 2) Fallback to BUILTIN if needed
@@ -83,10 +81,10 @@ export default function TopSignals({
         side:     String(p.side   || '').toLowerCase() === 'short' ? 'short' : 'long',
         confidencePercent: Number(p.confidencePercent ?? 0),
         riskPercent:       Number(p.riskPercent ?? 0),
-        entry: Number(p.entry ?? 0),
-        stop:  Number(p.stop  ?? 0),
+        entry: Number(p.entry ?? p.price ?? 0),
+        stop:  Number(p.stop  ?? p.stopLoss ?? 0),
         tp:    Number(p.tp    ?? p.takeProfit ?? 0),
-        reason: String(p.reason || p.note || ''),
+        reason: String(p.reason || p.reasoning || p.note || ''),
       }));
 
       // Client-side filter for user-chosen exchange/market
@@ -116,7 +114,7 @@ export default function TopSignals({
       <div className="mb-2 flex items-center justify-between">
         <h3 className="font-semibold text-zinc-100">Top Signals</h3>
         <div className="text-xs text-zinc-400">
-          {used === 'engine' ? 'Engine' : `Mode ${mode}`} • {ts ? ts.toLocaleTimeString() : '—'}
+          {used === 'engine' ? `Engine` : `Mode ${mode}`} • {ts ? ts.toLocaleTimeString() : '—'}
         </div>
       </div>
 
