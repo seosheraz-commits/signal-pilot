@@ -130,12 +130,14 @@ export default function Page() {
     return q ? symbols.filter(s => s.includes(q)) : symbols;
   }, [symbols, filter]);
 
-  // fallback signal so card is never blank
+  // fallback signal so card is never blank (spot-only quick calc)
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const base = exchange === 'binance' ? 'https://api.binance.com' : 'https://api.mexc.com';
+        const base = exchange === 'binance'
+          ? (market === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com')
+          : 'https://api.mexc.com';
         const url = `${base}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=220`;
         const raw = await fetch(url, { cache: 'no-store' }).then(r => r.json());
         if (!Array.isArray(raw) || raw.length < 60) return;
@@ -221,7 +223,7 @@ export default function Page() {
       } catch { if (!cancelled) setFallback(null); }
     })();
     return () => { cancelled = true; };
-  }, [exchange, symbol, interval]);
+  }, [exchange, market, symbol, interval]);
 
   function setOverlay(key: keyof Config['overlays'], on?: boolean) {
     setCfg(c => ({ ...c, overlays: { ...c.overlays, [key]: on ?? !(c.overlays as any)[key] } }));
@@ -309,6 +311,7 @@ export default function Page() {
             <CandleChart
               key={`${exchange}-${market}-${symbol}-${interval}-${JSON.stringify(cfg.overlays)}`}
               exchange={exchange}
+              market={market}           {/* <-- important */}
               symbol={symbol}
               interval={interval}
               config={cfg}
@@ -358,19 +361,18 @@ export default function Page() {
             lastSignal={lastForPanel}
           />
 
-          {/* Top Signals — filter by current exchange/market & chosen interval.
-              Clicking a pick updates exchange/market/symbol and seeds DemoTradePanel. */}
+          {/* Top Signals — clicking a pick updates exchange/market/symbol and seeds DemoTradePanel. */}
           <TopSignals
             interval={interval}
-            exchange={exchange as any}   // 'binance' | 'mexc' | 'both' accepted
-            market={market as any}       // 'spot' | 'futures' | 'both' accepted
+            exchange={exchange as any}
+            market={market as any}
             mode="strong"
+            source="auto"
             onSelect={(p: SignalPick) => {
               setExchange(p.exchange as Exchange);
               setMarket(p.market as Market);
               setSymbol(p.symbol);
               setLastPick({ entry: p.entry, stop: p.stop, tp: p.tp });
-              // optionally scroll to DemoTradePanel or highlight it
             }}
           />
         </main>
