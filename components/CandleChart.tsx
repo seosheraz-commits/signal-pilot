@@ -1,8 +1,10 @@
+// components/CandleChart.tsx
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
 import { ema, rsi, macd, atr, donchian, bollingerBandwidth } from '../lib/indicators';
 import { detectPattern, candleName, type Bar as PatBar } from '../lib/patterns';
+import { MEXC_FUTURES_MAP } from '@/lib/interval';
 
 type Exchange = 'binance' | 'mexc';
 type Market = 'spot' | 'futures';
@@ -57,6 +59,74 @@ function loadLW(): Promise<any> {
   });
 }
 
+/* ---------- CSS variables helper (w/ fallbacks) ---------- */
+function css(name: string, fallback: string) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/* ---------- Exchange fetchers (spot + futures) ---------- */
+async function fetchKlines(ex: Exchange, mk: Market, sym: string, tf: string, limit = 500): Promise<Bar[]> {
+  if (ex === 'binance') {
+    const base = mk === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com';
+    const url = `${base}/api/v3/klines?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(tf)}&limit=${limit}`;
+    const r = await fetch(url, { cache: 'no-store' });
+    const arr = await r.json();
+    if (!Array.isArray(arr)) throw new Error('klines bad');
+    return arr.map((k: any) => ({ time: Math.floor(+k[0] / 1000), open: +k[1], high: +k[2], low: +k[3], close: +k[4] }));
+  }
+  // MEXC
+  if (mk === 'spot') {
+    const url = `https://api.mexc.com/api/v3/klines?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(tf)}&limit=${limit}`;
+    const r = await fetch(url, { cache: 'no-store' });
+    const arr = await r.json();
+    if (!Array.isArray(arr)) throw new Error('klines bad');
+    return arr.map((k: any) => ({ time: Math.floor(+k[0] / 1000), open: +k[1], high: +k[2], low: +k[3], close: +k[4] }));
+  } else {
+    const pair = sym.endsWith('USDT') ? sym.replace('USDT', '_USDT') : sym;
+    const code = (MEXC_FUTURES_MAP as any)[tf] || 'Min5';
+    async function get(url: string) {
+      const r = await fetch(url, { cache: 'no-store' });
+      const d = await r.json();
+      return Array.isArray(d?.data) ? d.data : d;
+    }
+    let data: any[] = [];
+    try {
+      data = await get(`https://contract.mexc.com/api/v1/contract/kline?symbol=${pair}&interval=${code}&limit=${limit}`);
+    } catch {
+      data = await get(`https://contract.mexc.com/api/v1/contract/kline/${pair}?interval=${code}&limit=${limit}`);
+    }
+    return (data || []).map((k: any) => ({ time: Math.floor(+k[0] / 1000), open: +k[1], high: +k[2], low: +k[3], close: +k[4] }));
+  }
+}
+
+async function fetchTicker(ex: Exchange, mk: Market, sym: string): Promise<number | null> {
+  try {
+    if (ex === 'binance') {
+      const base = mk === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com';
+      const r = await fetch(`${base}/api/v3/ticker/price?symbol=${encodeURIComponent(sym)}`, { cache: 'no-store' });
+      const j = await r.json();
+      return Number(j?.price ?? 0) || null;
+    }
+    if (mk === 'spot') {
+      const r = await fetch(`https://api.mexc.com/api/v3/ticker/price?symbol=${encodeURIComponent(sym)}`, { cache: 'no-store' });
+      const j = await r.json();
+      return Number(j?.price ?? 0) || null;
+    } else {
+      const r = await fetch('https://contract.mexc.com/api/v1/contract/ticker', { cache: 'no-store' });
+      const d = await r.json();
+      const arr = Array.isArray(d?.data) ? d.data : [];
+      const target = arr.find((t: any) => String(t?.symbol || '') === sym.replace('USDT', '_USDT'));
+      const p = Number(target?.lastPrice ?? target?.fairPrice ?? target?.indexPrice ?? 0);
+      return p || null;
+    }
+  } catch { return null; }
+}
+
 // lightweight fallback patterns so HUD never shows “neutral” forever
 function fallbackPattern(prev?: Bar, cur?: Bar) {
   if (!prev || !cur) return { name: '', dir: 0 as 0 | 1 | -1 };
@@ -64,7 +134,6 @@ function fallbackPattern(prev?: Bar, cur?: Bar) {
   const range = cur.high - cur.low;
   const up = cur.high - Math.max(cur.close, cur.open);
   const dn = Math.min(cur.close, cur.open) - cur.low;
-  // engulfing
   if (cur.close > cur.open && prev.close < prev.open && cur.close >= prev.open && cur.open <= prev.close)
     return { name: 'Bull Engulf', dir: 1 };
   if (cur.close < cur.open && prev.close > prev.open && cur.open >= prev.close && cur.close <= prev.open)
@@ -73,38 +142,6 @@ function fallbackPattern(prev?: Bar, cur?: Bar) {
   if (up > 2 * body && up / (range || 1) > 0.6) return { name: 'Shooting Star', dir: -1 };
   if (body / (range || 1) < 0.1) return { name: 'Doji', dir: 0 };
   return { name: '', dir: 0 };
-}
-
-/* ---------------- Our API fetchers (unified spot/futures) ---------------- */
-
-async function fetchKlinesViaApi(ex: Exchange, mk: Market, sym: string, tf: string, limit = 500) {
-  const url = `/api/klines?exchange=${ex}&market=${mk}&symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(tf)}&limit=${limit}`;
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) throw new Error(`klines ${r.status}`);
-  const d = await r.json();
-  const arr: any[] = Array.isArray(d?.candles) ? d.candles : [];
-  if (!arr.length) throw new Error('no candles');
-  // Binance-style array: [openTime, open, high, low, close, volume, ...]
-  return arr.map((k) => ({
-    time: Math.floor(Number(k[0]) / 1000),
-    open: Number(k[1]),
-    high: Number(k[2]),
-    low: Number(k[3]),
-    close: Number(k[4]),
-  })) as Bar[];
-}
-
-async function fetchTickerViaApi(ex: Exchange, mk: Market, sym: string): Promise<number | null> {
-  const url = `/api/ticker?exchange=${ex}&market=${mk}&symbol=${encodeURIComponent(sym)}`;
-  try {
-    const r = await fetch(url, { cache: 'no-store' });
-    if (!r.ok) return null;
-    const d = await r.json();
-    const p = Number(d?.price);
-    return Number.isFinite(p) && p > 0 ? p : null;
-  } catch {
-    return null;
-  }
 }
 
 export default function CandleChart({
@@ -151,7 +188,7 @@ export default function CandleChart({
   const barsRef = useRef<Bar[]>([]);
   const markersRef = useRef<any[]>([]);
 
-  // HUD state (not refs) so it always re-renders
+  // HUD state
   const [sig, setSig] = useState<Signal | null>(null);
   const [patternTape, setPatternTape] = useState<string[]>([]);
   const [lastPattern, setLastPattern] = useState<string>('—');
@@ -167,16 +204,21 @@ export default function CandleChart({
     return () => clearInterval(id);
   }, []);
 
-  // freeze Entry/SL/TP for 5s when symbol/market/exchange changes
+  // freeze Entry/SL/TP for 5s when symbol changes
   useEffect(() => {
     setFreezeUntil(Date.now() + 5000);
-  }, [symbol, market, exchange]);
+  }, [symbol]);
 
   function setLivePriceLine(p: number) {
     setLivePrice(p);
     onLivePrice?.(p);
     try { if (liveLineRef.current) seriesRef.current?.removePriceLine(liveLineRef.current); } catch {}
-    liveLineRef.current = seriesRef.current?.createPriceLine({ price: p, color: '#60a5fa', lineWidth: 1, title: `Live ${p.toFixed(6)}` });
+    liveLineRef.current = seriesRef.current?.createPriceLine({
+      price: p,
+      color: css('--live', '#60a5fa'),
+      lineWidth: 1,
+      title: `Live ${p.toFixed(6)}`
+    });
   }
 
   function computeAndDecorate(hotPrice?: number) {
@@ -283,18 +325,20 @@ export default function CandleChart({
       regime > 0 ? `Regime OK (BBW ${bbw[i]?.toFixed(3) ?? '—'})` : `Regime weak (BBW ${bbw[i]?.toFixed(3) ?? '—'})`,
     ];
 
-    // fakeout detection: previous bar broke channel then closed back inside
+    // fakeout detection
     if (i >= 2 && dch.upper[i - 1] && dch.lower[i - 1]) {
       const cPrev = closes[i - 1];
-      const brokeUp = cPrev > dch.upper[i - 1] * (1 + buf);
-      const brokeDn = cPrev < dch.lower[i - 1] * (1 - buf);
+      const brokeUp = cPrev > dch.upper[i - 1] * (1 + config.breakoutBufferPct / 100);
+      const brokeDn = cPrev < dch.lower[i - 1] * (1 - config.breakoutBufferPct / 100);
       const insideNow = closes[i] < (dch.upper[i] ?? Infinity) && closes[i] > (dch.lower[i] ?? -Infinity);
       if (insideNow && brokeUp) reasons.push('Bull Fakeout (rejection)');
       if (insideNow && brokeDn) reasons.push('Bear Fakeout (reclaim)');
     }
 
-    // freeze Entry/SL/TP for 5s after symbol/market/exchange changes
-    let entryF = entry, slF = sl, tpF = tp;
+    // freeze Entry/SL/TP for 5s after symbol changes
+    let entryF = entry,
+      slF = sl,
+      tpF = tp;
     if (Date.now() < freezeUntil && sig) {
       entryF = sig.entry;
       slF = sig.sl;
@@ -303,43 +347,45 @@ export default function CandleChart({
 
     const signal: Signal = { label, confidence, entry: entryF, sl: slF, tp: tpF, riskPct, riskBand, reasons };
 
-    // push to parent + HUD state (forces re-render)
     setSig(signal);
-    onSignal?.(signal);
+    // push up
+    (typeof onSignal === 'function') && onSignal(signal);
 
     // overlays
     if (config.overlays.ema) {
       ema20Ref.current?.setData(e20.map((v, j) => ({ time: b[j].time, value: v })));
       ema50Ref.current?.setData(e50.map((v, j) => ({ time: b[j].time, value: v })));
     } else {
-      ema20Ref.current?.setData([]);
-      ema50Ref.current?.setData([]);
+      ema20Ref.current?.setData([]); ema50Ref.current?.setData([]);
     }
     if (config.overlays.bollinger) {
       bbURef.current?.setData(bbU.map((v, j) => ({ time: b[j].time, value: v })));
       bbMRef.current?.setData(bbM.map((v, j) => ({ time: b[j].time, value: v })));
       bbLRef.current?.setData(bbL.map((v, j) => ({ time: b[j].time, value: v })));
     } else {
-      bbURef.current?.setData([]);
-      bbMRef.current?.setData([]);
-      bbLRef.current?.setData([]);
+      bbURef.current?.setData([]); bbMRef.current?.setData([]); bbLRef.current?.setData([]);
     }
     if (config.overlays.donchian) {
       donURef.current?.setData(dch.upper.map((v, j) => ({ time: b[j].time, value: v })));
       donLRef.current?.setData(dch.lower.map((v, j) => ({ time: b[j].time, value: v })));
     } else {
-      donURef.current?.setData([]);
-      donLRef.current?.setData([]);
+      donURef.current?.setData([]); donLRef.current?.setData([]);
     }
 
-    // entry/sl/tp lines refresh (with frozen values)
+    // entry/sl/tp lines
     if (config.overlays.signalLevels && (label === 'Long' || label === 'Short')) {
       try { if (entryLineRef.current) seriesRef.current?.removePriceLine(entryLineRef.current); } catch {}
       try { if (slLineRef.current) seriesRef.current?.removePriceLine(slLineRef.current); } catch {}
       try { if (tpLineRef.current) seriesRef.current?.removePriceLine(tpLineRef.current); } catch {}
-      entryLineRef.current = seriesRef.current?.createPriceLine({ price: entryF, color: '#facc15', lineWidth: 2, title: `Entry ${entryF.toFixed(6)}` });
-      slLineRef.current = seriesRef.current?.createPriceLine({ price: slF, color: '#ef4444', lineWidth: 2, title: `SL ${slF.toFixed(6)}` });
-      tpLineRef.current = seriesRef.current?.createPriceLine({ price: tpF, color: '#22c55e', lineWidth: 2, title: `TP ${tpF.toFixed(6)}` });
+      entryLineRef.current = seriesRef.current?.createPriceLine({
+        price: entryF, color: css('--entry', '#facc15'), lineWidth: 2, title: `Entry ${entryF.toFixed(6)}`
+      });
+      slLineRef.current = seriesRef.current?.createPriceLine({
+        price: slF, color: css('--sl', '#ef4444'), lineWidth: 2, title: `SL ${slF.toFixed(6)}`
+      });
+      tpLineRef.current = seriesRef.current?.createPriceLine({
+        price: tpF, color: css('--tp', '#22c55e'), lineWidth: 2, title: `TP ${tpF.toFixed(6)}`
+      });
     }
 
     // support / resistance from last 20 bars
@@ -351,8 +397,12 @@ export default function CandleChart({
     }
     try { if (supportLineRef.current) seriesRef.current?.removePriceLine(supportLineRef.current); } catch {}
     try { if (resistanceLineRef.current) seriesRef.current?.removePriceLine(resistanceLineRef.current); } catch {}
-    supportLineRef.current = seriesRef.current?.createPriceLine({ price: recentLow, color: '#06b6d4', lineWidth: 1, title: `Support ${recentLow.toFixed(6)}` });
-    resistanceLineRef.current = seriesRef.current?.createPriceLine({ price: recentHigh, color: '#a855f7', lineWidth: 1, title: `Resistance ${recentHigh.toFixed(6)}` });
+    supportLineRef.current = seriesRef.current?.createPriceLine({
+      price: recentLow, color: css('--support', '#06b6d4'), lineWidth: 1, title: `Support ${recentLow.toFixed(6)}`
+    });
+    resistanceLineRef.current = seriesRef.current?.createPriceLine({
+      price: recentHigh, color: css('--resistance', '#a855f7'), lineWidth: 1, title: `Resistance ${recentHigh.toFixed(6)}`
+    });
 
     // closed-bar markers
     if (!hotPrice && closedIdx >= 1) {
@@ -387,8 +437,6 @@ export default function CandleChart({
 
     async function init() {
       setErr(null);
-      const LW = await loadLW();
-      if (!wrapRef.current) return;
 
       // cleanup
       try { wsKlineRef.current?.close(); } catch {}
@@ -400,12 +448,11 @@ export default function CandleChart({
       if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
       markersRef.current = [];
       barsRef.current = [];
-      setPatternTape([]);
-      setLastPattern('—');
-      setLastCandleName('—');
-      setSig(null);
-      setLivePrice(null);
-      setWsInfo('WS: connecting…');
+      setPatternTape([]); setLastPattern('—'); setLastCandleName('—'); setSig(null); setLivePrice(null);
+      setWsInfo(market === 'futures' && exchange === 'mexc' ? 'Poll: MEXC futures (2s klines + 1s price)' : 'WS: connecting…');
+
+      const LW = await loadLW();
+      if (!wrapRef.current) return;
 
       // chart
       const chart = LW.createChart(wrapRef.current, {
@@ -424,57 +471,48 @@ export default function CandleChart({
       chartRef.current = chart;
       seriesRef.current = series;
 
-      // overlay series
-      ema20Ref.current = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1 });
-      ema50Ref.current = chart.addLineSeries({ color: '#eab308', lineWidth: 1 });
-      bbURef.current = chart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
-      bbMRef.current = chart.addLineSeries({ color: '#93c5fd', lineWidth: 1 });
-      bbLRef.current = chart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
-      donURef.current = chart.addLineSeries({ color: '#10b981', lineWidth: 1 });
-      donLRef.current = chart.addLineSeries({ color: '#10b981', lineWidth: 1 });
+      // overlay series w/ CSS variable colors
+      ema20Ref.current = chart.addLineSeries({ color: css('--ema20', '#f59e0b'), lineWidth: 1 });
+      ema50Ref.current = chart.addLineSeries({ color: css('--ema50', '#eab308'), lineWidth: 1 });
+      bbURef.current = chart.addLineSeries({ color: css('--bb', '#60a5fa'), lineWidth: 1 });
+      bbMRef.current = chart.addLineSeries({ color: css('--bb-mid', '#93c5fd'), lineWidth: 1 });
+      bbLRef.current = chart.addLineSeries({ color: css('--bb', '#60a5fa'), lineWidth: 1 });
+      donURef.current = chart.addLineSeries({ color: css('--donchian', '#10b981'), lineWidth: 1 });
+      donLRef.current = chart.addLineSeries({ color: css('--donchian', '#10b981'), lineWidth: 1 });
 
-      // history via our API
+      // history
       try {
-        const data = await fetchKlinesViaApi(exchange as Exchange, market as Market, symbol, interval);
+        const data = await fetchKlines(exchange as Exchange, market as Market, symbol, interval, 500);
         if (disposed) return;
         barsRef.current = data;
         series.setData(data);
-        computeAndDecorate(); // closed-bar compute (patterns/candle names included)
+        computeAndDecorate(); // closed-bar compute
       } catch (e: any) {
         setErr(e?.message || 'history failed');
         return;
       }
 
-      // seed live via API ticker
-      const seed = await fetchTickerViaApi(exchange as Exchange, market as Market, symbol);
-      if (seed) {
-        setLivePriceLine(seed);
-        computeAndDecorate(seed);
-      }
+      // seed live
+      const seed = await fetchTicker(exchange as Exchange, market as Market, symbol);
+      if (seed) { setLivePriceLine(seed); computeAndDecorate(seed); }
 
-      // live updates
+      // live
       if (exchange === 'binance') {
-        // Spot WS host → stream.binance.com, Futures WS host → fstream.binance.com
         const host = market === 'futures' ? 'wss://fstream.binance.com/ws' : 'wss://stream.binance.com:9443/ws';
-        const klineUrl = `${host}/${symbol.toLowerCase()}@kline_${interval}`;
-        const tradeUrl = `${host}/${symbol.toLowerCase()}@trade`;
-
-        const wsK = new WebSocket(klineUrl);
+        const wsK = new WebSocket(`${host}/${symbol.toLowerCase()}@kline_${interval}`);
         wsKlineRef.current = wsK;
         wsK.onopen = () => { if (wsKlineRef.current === wsK) setWsInfo(`WS: live (${symbol})`); };
         wsK.onclose = () => { if (wsKlineRef.current === wsK) setWsInfo('WS: closed'); };
         wsK.onerror = () => { if (wsKlineRef.current === wsK) setWsInfo('WS: error'); };
         wsK.onmessage = (e) => {
           if (wsKlineRef.current !== wsK) return;
-          let k: any;
-          try { k = JSON.parse(e.data)?.k; } catch { return; }
+          const k = JSON.parse(e.data)?.k;
           if (!k) return;
           const bar: Bar = { time: Math.floor(k.t / 1000), open: +k.o, high: +k.h, low: +k.l, close: +k.c };
           if (k.x) {
             const arr = barsRef.current;
             const idx = arr.findIndex((x) => x.time === bar.time);
-            if (idx >= 0) arr[idx] = bar;
-            else arr.push(bar);
+            if (idx >= 0) arr[idx] = bar; else arr.push(bar);
             series.setData(arr);
             computeAndDecorate(); // closed
           } else {
@@ -484,30 +522,20 @@ export default function CandleChart({
           }
         };
 
-        const wsT = new WebSocket(tradeUrl);
+        const wsT = new WebSocket(`${host}/${symbol.toLowerCase()}@trade`);
         wsTradeRef.current = wsT;
         wsT.onmessage = (e) => {
           if (wsTradeRef.current !== wsT) return;
-          let price: number | null = null;
-          try {
-            const obj = JSON.parse(e.data);
-            // spot & futures both include 'p' for price
-            price = Number(obj?.p);
-          } catch {}
-          if (price) {
-            setLivePriceLine(price);
-            computeAndDecorate(price);
-          }
+          const p = Number(JSON.parse(e.data)?.p);
+          if (p) { setLivePriceLine(p); computeAndDecorate(p); }
         };
-
       } else {
-        // MEXC (spot & futures) → stable polling via our API
-        setWsInfo('Poll: 2s klines + 1s ticker');
+        // MEXC: poll (spot & futures)
+        setWsInfo(market === 'futures' ? 'Poll: 2s + ticker 1s (futures)' : 'Poll: 2s + ticker 1s');
         let lastClosed = barsRef.current[barsRef.current.length - 1]?.time ?? 0;
-
         pollKlinesRef.current = setInterval(async () => {
           try {
-            const arr = await fetchKlinesViaApi('mexc', market as Market, symbol, interval);
+            const arr = await fetchKlines(exchange as Exchange, market as Market, symbol, interval, 500);
             if (!arr.length) return;
             const latest = arr[arr.length - 1];
             barsRef.current = arr;
@@ -518,13 +546,9 @@ export default function CandleChart({
             }
           } catch {}
         }, 2000);
-
         pollTickerRef.current = setInterval(async () => {
-          const p = await fetchTickerViaApi('mexc', market as Market, symbol);
-          if (p) {
-            setLivePriceLine(p);
-            computeAndDecorate(p);
-          }
+          const p = await fetchTicker(exchange as Exchange, market as Market, symbol);
+          if (p) { setLivePriceLine(p); computeAndDecorate(p); }
         }, 1000);
       }
     }
@@ -533,8 +557,7 @@ export default function CandleChart({
     return () => {
       try { wsKlineRef.current?.close(); } catch {}
       try { wsTradeRef.current?.close(); } catch {}
-      wsKlineRef.current = null;
-      wsTradeRef.current = null;
+      wsKlineRef.current = null; wsTradeRef.current = null;
       if (pollKlinesRef.current) clearInterval(pollKlinesRef.current);
       if (pollTickerRef.current) clearInterval(pollTickerRef.current);
       if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
@@ -579,50 +602,17 @@ export default function CandleChart({
             maxWidth: '45vw',
           }}
         >
-          <div>
-            <span style={{ background: '#f59e0b', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />
-            EMA20
-          </div>
-          <div>
-            <span style={{ background: '#eab308', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />
-            EMA50
-          </div>
-          <div>
-            <span style={{ background: '#60a5fa', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />
-            BB Upper/Lower
-          </div>
-          <div>
-            <span style={{ background: '#93c5fd', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />
-            BB Mid
-          </div>
-          <div>
-            <span style={{ background: '#10b981', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />
-            Donchian Upper/Lower
-          </div>
-          <div>
-            <span style={{ background: '#60a5fa', display: 'inline-block', width: 10, height: 2, marginRight: 6 }} />
-            Live
-          </div>
-          <div>
-            <span style={{ background: '#facc15', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />
-            Entry
-          </div>
-          <div>
-            <span style={{ background: '#ef4444', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />
-            SL
-          </div>
-          <div>
-            <span style={{ background: '#22c55e', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />
-            TP
-          </div>
-          <div>
-            <span style={{ background: '#06b6d4', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />
-            Support
-          </div>
-          <div>
-            <span style={{ background: '#a855f7', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />
-            Resistance
-          </div>
+          <div><span style={{ background: '#f59e0b', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />EMA20</div>
+          <div><span style={{ background: '#eab308', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />EMA50</div>
+          <div><span style={{ background: '#60a5fa', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />BB Upper/Lower</div>
+          <div><span style={{ background: '#93c5fd', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />BB Mid</div>
+          <div><span style={{ background: '#10b981', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />Donchian Upper/Lower</div>
+          <div><span style={{ background: '#60a5fa', display: 'inline-block', width: 10, height: 2, marginRight: 6 }} />Live</div>
+          <div><span style={{ background: '#facc15', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />Entry</div>
+          <div><span style={{ background: '#ef4444', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />SL</div>
+          <div><span style={{ background: '#22c55e', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />TP</div>
+          <div><span style={{ background: '#06b6d4', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />Support</div>
+          <div><span style={{ background: '#a855f7', display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6 }} />Resistance</div>
         </div>
       )}
 
