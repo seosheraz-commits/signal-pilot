@@ -3,13 +3,15 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { listSymbols, type Exchange, type Market } from '../lib/symbols';
 import Watchlist from '../components/Watchlist';
 import DemoTradePanel from '../components/DemoTradePanel';
 import TopSignals, { type Pick as SignalPick } from '../components/TopSignals';
 import IndicatorManager from '../components/IndicatorManager';
 
 const CandleChart = dynamic(() => import('../components/CandleChart'), { ssr: false });
+
+type Exchange = 'binance' | 'mexc';
+type Market = 'spot' | 'futures';
 
 type QuotePreset = 'USDT' | 'USDT+USDC' | 'All stables' | 'USDC' | 'FDUSD' | 'TUSD';
 const quotesFor = (p: QuotePreset) =>
@@ -128,18 +130,28 @@ export default function Page() {
   const sessionRef = useRef(0);
   useEffect(() => { sessionRef.current += 1; setLivePrice(null); setSignal(null); setFallback(null); }, [exchange, market, symbol, interval]);
 
-  // symbols by exchange/market/quotes
+  // symbols by exchange/market/quotes — call OUR API to avoid client CORS issues + get robust union
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const list = await listSymbols(exchange, quotesFor(preset), market);
+        const r = await fetch(`/api/symbols?exchange=${exchange}&market=${market}`, { cache: 'no-store' });
+        const d = await r.json();
+        const want = new Set(quotesFor(preset).map(s => s.toUpperCase()));
+        const list: string[] = Array.isArray(d?.symbols)
+          ? d.symbols
+              .filter((s: any) => want.has(String(s.quote || 'USDT').toUpperCase()))
+              .map((s: any) => String(s.symbol).toUpperCase())
+          : [];
+        const out = list.length ? list : ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','BNBUSDT'];
         if (cancelled) return;
-        setSymbols(list);
-        setSymbol((prev) => (list.includes(prev) ? prev : (list[0] ?? 'BTCUSDT')));
+        setSymbols(out);
+        setSymbol((prev) => (out.includes(prev) ? prev : out[0]));
       } catch {
         if (cancelled) return;
-        setSymbols(['BTCUSDT']); setSymbol('BTCUSDT');
+        const out = ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','BNBUSDT'];
+        setSymbols(out);
+        setSymbol(out[0]);
       }
     })();
     return () => { cancelled = true; };
@@ -159,12 +171,16 @@ export default function Page() {
     return q ? symbols.filter(s => s.includes(q)) : symbols;
   }, [symbols, filter]);
 
-  // fallback signal so card is never blank (reads spot klines from exchange REST)
+  // fallback signal so card is never blank
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const base = exchange === 'binance' ? 'https://api.binance.com' : 'https://api.mexc.com';
+        // Use the exchange endpoints directly for quick read (spot endpoints are fine for a rough read)
+        const base =
+          exchange === 'binance'
+            ? (market === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com')
+            : 'https://api.mexc.com';
         const url = `${base}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=220`;
         const raw = await fetch(url, { cache: 'no-store' }).then(r => r.json());
         if (!Array.isArray(raw) || raw.length < 60) return;
@@ -188,7 +204,7 @@ export default function Page() {
 
         const loTouch = l[touchIdx], hiTouch = h[touchIdx];
         const confClose = c[confIdx], confOpen = o[confIdx];
-        const bull = confClose >= confOpen, bear = !bull;
+        const bull = confClose >= confOpen;
 
         const tol = 0.0015, buf = 0.0020;
         const touchedSup = loTouch <= support * (1 + tol);
@@ -207,7 +223,7 @@ export default function Page() {
             reasons:['Support touch + 1 bull confirm','EMA20≥EMA50'], support, resistance, rsi: Number((r ?? 0).toFixed(2)), ema20, ema50 });
           return;
         }
-        if (touchedRes && bear && confBelow) {
+        if (touchedRes && !bull && confBelow) {
           const entry = confClose, sl = Math.max(resistance * (1 + tol), hiTouch);
           const risk = Math.max(1e-12, sl - entry); const room = (entry - support) / entry;
           const tp = room >= 0.1 ? support : entry - 2 * risk;
@@ -250,7 +266,7 @@ export default function Page() {
       } catch { if (!cancelled) setFallback(null); }
     })();
     return () => { cancelled = true; };
-  }, [exchange, symbol, interval]);
+  }, [exchange, market, symbol, interval]);
 
   function setOverlay(key: keyof Config['overlays'], on?: boolean) {
     setCfg(c => ({ ...c, overlays: { ...c.overlays, [key]: on ?? !(c.overlays as any)[key] } }));
@@ -386,13 +402,13 @@ export default function Page() {
             lastSignal={lastForPanel}
           />
 
-          {/* Top Signals — pull from engine; clicking a pick updates exchange/market/symbol and seeds DemoTradePanel. */}
+          {/* Top Signals — try engine first, then builtin fallback automatically */}
           <TopSignals
             interval={interval}
             exchange={exchange as any}   // 'binance' | 'mexc' | 'both'
             market={market as any}       // 'spot' | 'futures' | 'both'
             mode="strong"
-            source="engine"              // force engine so it doesn’t fall back
+            source="auto"
             onSelect={(p: SignalPick) => {
               setExchange(p.exchange as Exchange);
               setMarket(p.market as Market);
