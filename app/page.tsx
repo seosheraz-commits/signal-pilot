@@ -70,7 +70,6 @@ const ema = (arr: number[], p: number) => {
   }
   return out;
 };
-
 const rsi = (c: number[], p = 14) => {
   if (c.length < p + 2) return Array(c.length).fill(null) as (number | null)[];
   let g = 0, l = 0;
@@ -81,27 +80,14 @@ const rsi = (c: number[], p = 14) => {
   for (let i = p + 1; i < c.length; i++) {
     const d = c[i] - c[i - 1];
     const ga = Math.max(d, 0), lo = Math.max(-d, 0);
-    ag = (ag * (p - 1) + ga) / p;
-    al = (al * (p - 1) + lo) / p;
+    ag = (ag * (p - 1) + ga) / p; al = (al * (p - 1) + lo) / p;
     out.push(100 - 100 / (1 + (ag / (al || 1e-12))));
   }
   while (out.length < c.length) out.unshift(null);
   return out;
 };
-
-const maxN = (arr: number[], n: number) => {
-  const s = Math.max(0, arr.length - n);
-  let m = -Infinity;
-  for (let i = s; i < arr.length; i++) if (arr[i] > m) m = arr[i];
-  return m;
-};
-
-const minN = (arr: number[], n: number) => {
-  const s = Math.max(0, arr.length - n);
-  let m = Infinity;
-  for (let i = s; i < arr.length; i++) if (arr[i] < m) m = arr[i];
-  return m;
-};
+const maxN = (arr: number[], n: number) => { const s = Math.max(0, arr.length - n); let m = -Infinity; for (let i = s; i < arr.length; i++) if (arr[i] > m) m = arr[i]; return m; };
+const minN = (arr: number[], n: number) => { const s = Math.max(0, arr.length - n); let m = Infinity; for (let i = s; i < arr.length; i++) if (arr[i] < m) m = arr[i]; return m; };
 
 type Fallback =
   | { kind: 'ready' | 'soft'; side: 'LONG'|'SHORT'; entry: number; sl: number; tp: number; conf: number; riskPct: number; reasons: string[]; support: number; resistance: number; rsi: number; ema20: number; ema50: number; };
@@ -130,23 +116,68 @@ export default function Page() {
   const sessionRef = useRef(0);
   useEffect(() => { sessionRef.current += 1; setLivePrice(null); setSignal(null); setFallback(null); }, [exchange, market, symbol, interval]);
 
-  // symbols by exchange/market/quotes — call OUR API to avoid client CORS issues + get robust union
+  // robust symbol loader: try our API, then client fallbacks per exchange/market
   useEffect(() => {
     let cancelled = false;
+
+    async function fetchJSON(url: string) {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error(String(r.status));
+      return r.json();
+    }
+
+    async function fromApi(): Promise<string[]> {
+      const r = await fetch(`/api/symbols?exchange=${exchange}&market=${market}`, { cache: 'no-store' });
+      const d = await r.json();
+      const want = new Set(quotesFor(preset).map(s => s.toUpperCase()));
+      const list: string[] = Array.isArray(d?.symbols)
+        ? d.symbols
+            .filter((s: any) => want.has(String(s.quote || 'USDT').toUpperCase()))
+            .map((s: any) => String(s.symbol).toUpperCase())
+        : [];
+      return list;
+    }
+
+    async function clientFallback(): Promise<string[]> {
+      const want = new Set(quotesFor(preset).map(s => s.toUpperCase()));
+      if (exchange === 'binance') {
+        const url =
+          market === 'futures'
+            ? 'https://fapi.binance.com/fapi/v1/exchangeInfo'
+            : 'https://api.binance.com/api/v3/exchangeInfo';
+        const d = await fetchJSON(url);
+        return (d.symbols || [])
+          .filter((s: any) => want.has(String(s.quoteAsset).toUpperCase()))
+          .map((s: any) => String(s.symbol).toUpperCase());
+      } else {
+        // MEXC: use exchangeInfo, fallback to ticker/24hr
+        try {
+          const d = await fetchJSON('https://api.mexc.com/api/v3/exchangeInfo');
+          const a = (d.symbols || [])
+            .filter((s: any) => want.has(String(s.quoteAsset).toUpperCase()))
+            .map((s: any) => String(s.symbol).toUpperCase());
+          if (a.length) return a;
+        } catch {}
+        const t = await fetchJSON('https://api.mexc.com/api/v3/ticker/24hr');
+        return (t || [])
+          .map((x: any) => String(x.symbol).toUpperCase())
+          .filter((sym: string) => {
+            const quotes = ['USDT','USDC','FDUSD','TUSD','BUSD'];
+            const q = quotes.find(q => sym.endsWith(q));
+            return !!q && want.has(q);
+          });
+      }
+    }
+
     (async () => {
       try {
-        const r = await fetch(`/api/symbols?exchange=${exchange}&market=${market}`, { cache: 'no-store' });
-        const d = await r.json();
-        const want = new Set(quotesFor(preset).map(s => s.toUpperCase()));
-        const list: string[] = Array.isArray(d?.symbols)
-          ? d.symbols
-              .filter((s: any) => want.has(String(s.quote || 'USDT').toUpperCase()))
-              .map((s: any) => String(s.symbol).toUpperCase())
-          : [];
-        const out = list.length ? list : ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','BNBUSDT'];
+        let list = await fromApi();
+        if (!list.length) list = await clientFallback();
+        if (!list.length) list = ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','BNBUSDT'];
+        const sorted = Array.from(new Set(list)).sort();
         if (cancelled) return;
-        setSymbols(out);
-        setSymbol((prev) => (out.includes(prev) ? prev : out[0]));
+        setSymbols(sorted);
+        setSymbol((prev) => (sorted.includes(prev) ? prev : sorted[0]));
       } catch {
         if (cancelled) return;
         const out = ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','BNBUSDT'];
@@ -154,6 +185,7 @@ export default function Page() {
         setSymbol(out[0]);
       }
     })();
+
     return () => { cancelled = true; };
   }, [exchange, preset, market]);
 
@@ -176,11 +208,10 @@ export default function Page() {
     let cancelled = false;
     (async () => {
       try {
-        // Use the exchange endpoints directly for quick read (spot endpoints are fine for a rough read)
         const base =
           exchange === 'binance'
             ? (market === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com')
-            : 'https://api.mexc.com';
+            : 'https://api.mexc.com'; // for MEXC we only use spot klines here for a rough read
         const url = `${base}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=220`;
         const raw = await fetch(url, { cache: 'no-store' }).then(r => r.json());
         if (!Array.isArray(raw) || raw.length < 60) return;
@@ -354,6 +385,7 @@ export default function Page() {
             <CandleChart
               key={`${exchange}-${market}-${symbol}-${interval}-${JSON.stringify(cfg.overlays)}`}
               exchange={exchange}
+              market={market}
               symbol={symbol}
               interval={interval}
               config={cfg}
@@ -397,16 +429,17 @@ export default function Page() {
           <DemoTradePanel
             key={`${exchange}-${market}-${symbol}`}
             exchange={exchange}
+            market={market}
             symbol={symbol}
             livePrice={livePrice}
             lastSignal={lastForPanel}
           />
 
-          {/* Top Signals — try engine first, then builtin fallback automatically */}
+          {/* Top Signals — try engine first, then builtin fallback automatically (see component fix) */}
           <TopSignals
             interval={interval}
-            exchange={exchange as any}   // 'binance' | 'mexc' | 'both'
-            market={market as any}       // 'spot' | 'futures' | 'both'
+            exchange={exchange as any}
+            market={market as any}
             mode="strong"
             source="auto"
             onSelect={(p: SignalPick) => {
