@@ -1,4 +1,3 @@
-// components/CandleChart.tsx
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
@@ -59,74 +58,6 @@ function loadLW(): Promise<any> {
   });
 }
 
-/* ---------- CSS variables helper (w/ fallbacks) ---------- */
-function css(name: string, fallback: string) {
-  try {
-    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    return v || fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-/* ---------- Exchange fetchers (spot + futures) ---------- */
-async function fetchKlines(ex: Exchange, mk: Market, sym: string, tf: string, limit = 500): Promise<Bar[]> {
-  if (ex === 'binance') {
-    const base = mk === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com';
-    const url = `${base}/api/v3/klines?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(tf)}&limit=${limit}`;
-    const r = await fetch(url, { cache: 'no-store' });
-    const arr = await r.json();
-    if (!Array.isArray(arr)) throw new Error('klines bad');
-    return arr.map((k: any) => ({ time: Math.floor(+k[0] / 1000), open: +k[1], high: +k[2], low: +k[3], close: +k[4] }));
-  }
-  // MEXC
-  if (mk === 'spot') {
-    const url = `https://api.mexc.com/api/v3/klines?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(tf)}&limit=${limit}`;
-    const r = await fetch(url, { cache: 'no-store' });
-    const arr = await r.json();
-    if (!Array.isArray(arr)) throw new Error('klines bad');
-    return arr.map((k: any) => ({ time: Math.floor(+k[0] / 1000), open: +k[1], high: +k[2], low: +k[3], close: +k[4] }));
-  } else {
-    const pair = sym.endsWith('USDT') ? sym.replace('USDT', '_USDT') : sym;
-    const code = (MEXC_FUTURES_MAP as any)[tf] || 'Min5';
-    async function get(url: string) {
-      const r = await fetch(url, { cache: 'no-store' });
-      const d = await r.json();
-      return Array.isArray(d?.data) ? d.data : d;
-    }
-    let data: any[] = [];
-    try {
-      data = await get(`https://contract.mexc.com/api/v1/contract/kline?symbol=${pair}&interval=${code}&limit=${limit}`);
-    } catch {
-      data = await get(`https://contract.mexc.com/api/v1/contract/kline/${pair}?interval=${code}&limit=${limit}`);
-    }
-    return (data || []).map((k: any) => ({ time: Math.floor(+k[0] / 1000), open: +k[1], high: +k[2], low: +k[3], close: +k[4] }));
-  }
-}
-
-async function fetchTicker(ex: Exchange, mk: Market, sym: string): Promise<number | null> {
-  try {
-    if (ex === 'binance') {
-      const base = mk === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com';
-      const r = await fetch(`${base}/api/v3/ticker/price?symbol=${encodeURIComponent(sym)}`, { cache: 'no-store' });
-      const j = await r.json();
-      return Number(j?.price ?? 0) || null;
-    }
-    if (mk === 'spot') {
-      const r = await fetch(`https://api.mexc.com/api/v3/ticker/price?symbol=${encodeURIComponent(sym)}`, { cache: 'no-store' });
-      const j = await r.json();
-      return Number(j?.price ?? 0) || null;
-    } else {
-      const r = await fetch('https://contract.mexc.com/api/v1/contract/ticker', { cache: 'no-store' });
-      const d = await r.json();
-      const arr = Array.isArray(d?.data) ? d.data : [];
-      const target = arr.find((t: any) => String(t?.symbol || '') === sym.replace('USDT', '_USDT'));
-      const p = Number(target?.lastPrice ?? target?.fairPrice ?? target?.indexPrice ?? 0);
-      return p || null;
-    }
-  } catch { return null; }
-}
-
 // lightweight fallback patterns so HUD never shows “neutral” forever
 function fallbackPattern(prev?: Bar, cur?: Bar) {
   if (!prev || !cur) return { name: '', dir: 0 as 0 | 1 | -1 };
@@ -134,6 +65,7 @@ function fallbackPattern(prev?: Bar, cur?: Bar) {
   const range = cur.high - cur.low;
   const up = cur.high - Math.max(cur.close, cur.open);
   const dn = Math.min(cur.close, cur.open) - cur.low;
+  // engulfing
   if (cur.close > cur.open && prev.close < prev.open && cur.close >= prev.open && cur.open <= prev.close)
     return { name: 'Bull Engulf', dir: 1 };
   if (cur.close < cur.open && prev.close > prev.open && cur.open >= prev.close && cur.close <= prev.open)
@@ -143,6 +75,144 @@ function fallbackPattern(prev?: Bar, cur?: Bar) {
   if (body / (range || 1) < 0.1) return { name: 'Doji', dir: 0 };
   return { name: '', dir: 0 };
 }
+
+/* -------------------------- fetch helpers -------------------------- */
+
+/** Try our API first (avoids CORS, handles MEXC futures), then fall back to exchange endpoints. */
+async function fetchKlinesWithFallback(ex: Exchange, mk: Market, sym: string, tf: string): Promise<Bar[]> {
+  // 1) Our normalized API
+  try {
+    const url = `/api/klines?exchange=${ex}&market=${mk}&symbol=${encodeURIComponent(sym)}&interval=${tf}&limit=500`;
+    const r = await fetch(url, { cache: 'no-store' });
+    if (r.ok) {
+      const raw = await r.json();
+      const arr = Array.isArray(raw?.klines) ? raw.klines : Array.isArray(raw) ? raw : null;
+      if (Array.isArray(arr) && arr.length) {
+        // support [time, open, high, low, close, vol] or objects
+        if (Array.isArray(arr[0])) {
+          return arr.map((k: any) => ({
+            time: Math.floor(Number(k[0]) / 1000),
+            open: Number(k[1]),
+            high: Number(k[2]),
+            low: Number(k[3]),
+            close: Number(k[4]),
+          }));
+        } else {
+          return arr.map((k: any) => ({
+            time: Math.floor(Number(k.t ?? k.time) / 1000),
+            open: Number(k.o ?? k.open),
+            high: Number(k.h ?? k.high),
+            low: Number(k.l ?? k.low),
+            close: Number(k.c ?? k.close),
+          }));
+        }
+      }
+    }
+  } catch {}
+
+  // 2) Direct exchanges as a fallback
+  try {
+    if (ex === 'binance') {
+      const base =
+        mk === 'futures'
+          ? 'https://fapi.binance.com/fapi/v1/klines'
+          : 'https://api.binance.com/api/v3/klines';
+      const u = `${base}?symbol=${sym}&interval=${tf}&limit=500`;
+      const r = await fetch(u, { cache: 'no-store' });
+      if (!r.ok) throw 0;
+      const arr = (await r.json()) as any[];
+      return arr.map((k) => ({
+        time: Math.floor(Number(k[0]) / 1000),
+        open: Number(k[1]),
+        high: Number(k[2]),
+        low: Number(k[3]),
+        close: Number(k[4]),
+      }));
+    }
+
+    // MEXC
+    if (mk === 'spot') {
+      const u = `https://api.mexc.com/api/v3/klines?symbol=${sym}&interval=${tf}&limit=500`;
+      const r = await fetch(u, { cache: 'no-store' });
+      if (!r.ok) throw 0;
+      const arr = (await r.json()) as any[];
+      return arr.map((k) => ({
+        time: Math.floor(Number(k[0]) / 1000),
+        open: Number(k[1]),
+        high: Number(k[2]),
+        low: Number(k[3]),
+        close: Number(k[4]),
+      }));
+    } else {
+      // futures
+      const pair = sym.endsWith('USDT') ? sym.replace('USDT', '_USDT') : sym;
+      const iv = MEXC_FUTURES_MAP[tf as keyof typeof MEXC_FUTURES_MAP] || 'Min1';
+      const tryUrls = [
+        `https://contract.mexc.com/api/v1/contract/kline?symbol=${pair}&interval=${iv}&limit=500`,
+        `https://contract.mexc.com/api/v1/contract/kline/${pair}?interval=${iv}&limit=500`,
+      ];
+      for (const u of tryUrls) {
+        try {
+          const r = await fetch(u, { cache: 'no-store' });
+          if (!r.ok) continue;
+          const d = await r.json();
+          const arr: any[] = Array.isArray(d?.data) ? d.data : Array.isArray(d) ? d : [];
+          if (!arr.length) continue;
+          return arr.map((k) => ({
+            time: Math.floor(Number(k[0]) / 1000),
+            open: Number(k[1]),
+            high: Number(k[2]),
+            low: Number(k[3]),
+            close: Number(k[4]),
+          }));
+        } catch {}
+      }
+    }
+  } catch {}
+
+  throw new Error('all klines endpoints failed');
+}
+
+async function fetchTickerPriceWithFallback(ex: Exchange, mk: Market, sym: string): Promise<number | null> {
+  // our API first
+  try {
+    const r = await fetch(`/api/ticker?exchange=${ex}&market=${mk}&symbol=${encodeURIComponent(sym)}`, { cache: 'no-store' });
+    const j = await r.json();
+    const p = Number(j?.price);
+    if (p > 0 && Number.isFinite(p)) return p;
+  } catch {}
+
+  // direct exchanges
+  try {
+    if (ex === 'binance') {
+      const base =
+        mk === 'futures'
+          ? 'https://fapi.binance.com/fapi/v1/ticker/price'
+          : 'https://api.binance.com/api/v3/ticker/price';
+      const r = await fetch(`${base}?symbol=${sym}`, { cache: 'no-store' });
+      if (!r.ok) throw 0;
+      const j = await r.json();
+      const p = Number(j?.price);
+      return Number.isFinite(p) && p > 0 ? p : null;
+    }
+    if (mk === 'spot') {
+      const r = await fetch(`https://api.mexc.com/api/v3/ticker/price?symbol=${sym}`, { cache: 'no-store' });
+      const j = await r.json();
+      const p = Number(j?.price);
+      return Number.isFinite(p) && p > 0 ? p : null;
+    } else {
+      const r = await fetch(`https://contract.mexc.com/api/v1/contract/ticker`, { cache: 'no-store' });
+      const d = await r.json();
+      const pair = sym.replace('USDT', '_USDT');
+      const hit = (d?.data || []).find((t: any) => t.symbol === pair);
+      const p = Number(hit?.lastPrice ?? hit?.fairPrice ?? hit?.indexPrice);
+      return Number.isFinite(p) && p > 0 ? p : null;
+    }
+  } catch {}
+  return null;
+}
+
+/* ----------------------- component proper ----------------------- */
 
 export default function CandleChart({
   exchange = 'binance',
@@ -213,12 +283,7 @@ export default function CandleChart({
     setLivePrice(p);
     onLivePrice?.(p);
     try { if (liveLineRef.current) seriesRef.current?.removePriceLine(liveLineRef.current); } catch {}
-    liveLineRef.current = seriesRef.current?.createPriceLine({
-      price: p,
-      color: css('--live', '#60a5fa'),
-      lineWidth: 1,
-      title: `Live ${p.toFixed(6)}`
-    });
+    liveLineRef.current = seriesRef.current?.createPriceLine({ price: p, color: '#60a5fa', lineWidth: 1, title: `Live ${p.toFixed(6)}` });
   }
 
   function computeAndDecorate(hotPrice?: number) {
@@ -300,10 +365,8 @@ export default function CandleChart({
     if (label === 'No Trade' && strong && regime > 0) label = score > 0 ? 'Long' : 'Short';
     if (label !== 'No Trade' && regime < 0 && channel === 0 && patDir === 0) label = 'No Trade';
 
-    const sumW = Math.max(
-      1,
-      Math.abs(w.trend) + Math.abs(w.momentum) + Math.abs(w.breakout) + Math.abs(w.pattern) + Math.abs(w.regime),
-    );
+    const sumW =
+      Math.abs(w.trend) + Math.abs(w.momentum) + Math.abs(w.breakout) + Math.abs(w.pattern) + Math.abs(w.regime) || 1;
     const confVotes = (label === 'Long' ? posVotes : label === 'Short' ? negVotes : 0) / 4;
     const confScore = Math.min(1, Math.abs(score) / sumW);
     const confidence = Math.round(100 * (0.6 * confVotes + 0.4 * confScore));
@@ -325,67 +388,38 @@ export default function CandleChart({
       regime > 0 ? `Regime OK (BBW ${bbw[i]?.toFixed(3) ?? '—'})` : `Regime weak (BBW ${bbw[i]?.toFixed(3) ?? '—'})`,
     ];
 
-    // fakeout detection
-    if (i >= 2 && dch.upper[i - 1] && dch.lower[i - 1]) {
-      const cPrev = closes[i - 1];
-      const brokeUp = cPrev > dch.upper[i - 1] * (1 + config.breakoutBufferPct / 100);
-      const brokeDn = cPrev < dch.lower[i - 1] * (1 - config.breakoutBufferPct / 100);
-      const insideNow = closes[i] < (dch.upper[i] ?? Infinity) && closes[i] > (dch.lower[i] ?? -Infinity);
-      if (insideNow && brokeUp) reasons.push('Bull Fakeout (rejection)');
-      if (insideNow && brokeDn) reasons.push('Bear Fakeout (reclaim)');
-    }
-
-    // freeze Entry/SL/TP for 5s after symbol changes
-    let entryF = entry,
-      slF = sl,
-      tpF = tp;
-    if (Date.now() < freezeUntil && sig) {
-      entryF = sig.entry;
-      slF = sig.sl;
-      tpF = sig.tp;
-    }
+    // freeze Entry/SL/TP briefly after symbol changes
+    let entryF = entry, slF = sl, tpF = tp;
+    if (Date.now() < freezeUntil && sig) { entryF = sig.entry; slF = sig.sl; tpF = sig.tp; }
 
     const signal: Signal = { label, confidence, entry: entryF, sl: slF, tp: tpF, riskPct, riskBand, reasons };
 
     setSig(signal);
-    // push up
-    (typeof onSignal === 'function') && onSignal(signal);
+    onSignal?.(signal);
 
     // overlays
     if (config.overlays.ema) {
       ema20Ref.current?.setData(e20.map((v, j) => ({ time: b[j].time, value: v })));
       ema50Ref.current?.setData(e50.map((v, j) => ({ time: b[j].time, value: v })));
-    } else {
-      ema20Ref.current?.setData([]); ema50Ref.current?.setData([]);
-    }
+    } else { ema20Ref.current?.setData([]); ema50Ref.current?.setData([]); }
     if (config.overlays.bollinger) {
       bbURef.current?.setData(bbU.map((v, j) => ({ time: b[j].time, value: v })));
       bbMRef.current?.setData(bbM.map((v, j) => ({ time: b[j].time, value: v })));
       bbLRef.current?.setData(bbL.map((v, j) => ({ time: b[j].time, value: v })));
-    } else {
-      bbURef.current?.setData([]); bbMRef.current?.setData([]); bbLRef.current?.setData([]);
-    }
+    } else { bbURef.current?.setData([]); bbMRef.current?.setData([]); bbLRef.current?.setData([]); }
     if (config.overlays.donchian) {
       donURef.current?.setData(dch.upper.map((v, j) => ({ time: b[j].time, value: v })));
       donLRef.current?.setData(dch.lower.map((v, j) => ({ time: b[j].time, value: v })));
-    } else {
-      donURef.current?.setData([]); donLRef.current?.setData([]);
-    }
+    } else { donURef.current?.setData([]); donLRef.current?.setData([]); }
 
     // entry/sl/tp lines
     if (config.overlays.signalLevels && (label === 'Long' || label === 'Short')) {
       try { if (entryLineRef.current) seriesRef.current?.removePriceLine(entryLineRef.current); } catch {}
       try { if (slLineRef.current) seriesRef.current?.removePriceLine(slLineRef.current); } catch {}
       try { if (tpLineRef.current) seriesRef.current?.removePriceLine(tpLineRef.current); } catch {}
-      entryLineRef.current = seriesRef.current?.createPriceLine({
-        price: entryF, color: css('--entry', '#facc15'), lineWidth: 2, title: `Entry ${entryF.toFixed(6)}`
-      });
-      slLineRef.current = seriesRef.current?.createPriceLine({
-        price: slF, color: css('--sl', '#ef4444'), lineWidth: 2, title: `SL ${slF.toFixed(6)}`
-      });
-      tpLineRef.current = seriesRef.current?.createPriceLine({
-        price: tpF, color: css('--tp', '#22c55e'), lineWidth: 2, title: `TP ${tpF.toFixed(6)}`
-      });
+      entryLineRef.current = seriesRef.current?.createPriceLine({ price: entryF, color: '#facc15', lineWidth: 2, title: `Entry ${entryF.toFixed(6)}` });
+      slLineRef.current     = seriesRef.current?.createPriceLine({ price: slF,    color: '#ef4444', lineWidth: 2, title: `SL ${slF.toFixed(6)}` });
+      tpLineRef.current     = seriesRef.current?.createPriceLine({ price: tpF,    color: '#22c55e', lineWidth: 2, title: `TP ${tpF.toFixed(6)}` });
     }
 
     // support / resistance from last 20 bars
@@ -393,16 +427,12 @@ export default function CandleChart({
     const LBL = 20;
     for (let j = Math.max(0, b.length - LBL); j < b.length; j++) {
       recentHigh = Math.max(recentHigh, b[j].high);
-      recentLow = Math.min(recentLow, b[j].low);
+      recentLow  = Math.min(recentLow,  b[j].low);
     }
     try { if (supportLineRef.current) seriesRef.current?.removePriceLine(supportLineRef.current); } catch {}
     try { if (resistanceLineRef.current) seriesRef.current?.removePriceLine(resistanceLineRef.current); } catch {}
-    supportLineRef.current = seriesRef.current?.createPriceLine({
-      price: recentLow, color: css('--support', '#06b6d4'), lineWidth: 1, title: `Support ${recentLow.toFixed(6)}`
-    });
-    resistanceLineRef.current = seriesRef.current?.createPriceLine({
-      price: recentHigh, color: css('--resistance', '#a855f7'), lineWidth: 1, title: `Resistance ${recentHigh.toFixed(6)}`
-    });
+    supportLineRef.current    = seriesRef.current?.createPriceLine({ price: recentLow,  color: '#06b6d4', lineWidth: 1, title: `Support ${recentLow.toFixed(6)}` });
+    resistanceLineRef.current = seriesRef.current?.createPriceLine({ price: recentHigh, color: '#a855f7', lineWidth: 1, title: `Resistance ${recentHigh.toFixed(6)}` });
 
     // closed-bar markers
     if (!hotPrice && closedIdx >= 1) {
@@ -438,6 +468,9 @@ export default function CandleChart({
     async function init() {
       setErr(null);
 
+      const LW = await loadLW();
+      if (!wrapRef.current) return;
+
       // cleanup
       try { wsKlineRef.current?.close(); } catch {}
       try { wsTradeRef.current?.close(); } catch {}
@@ -448,11 +481,12 @@ export default function CandleChart({
       if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
       markersRef.current = [];
       barsRef.current = [];
-      setPatternTape([]); setLastPattern('—'); setLastCandleName('—'); setSig(null); setLivePrice(null);
-      setWsInfo(market === 'futures' && exchange === 'mexc' ? 'Poll: MEXC futures (2s klines + 1s price)' : 'WS: connecting…');
-
-      const LW = await loadLW();
-      if (!wrapRef.current) return;
+      setPatternTape([]);
+      setLastPattern('—');
+      setLastCandleName('—');
+      setSig(null);
+      setLivePrice(null);
+      setWsInfo('WS: connecting…');
 
       // chart
       const chart = LW.createChart(wrapRef.current, {
@@ -471,18 +505,18 @@ export default function CandleChart({
       chartRef.current = chart;
       seriesRef.current = series;
 
-      // overlay series w/ CSS variable colors
-      ema20Ref.current = chart.addLineSeries({ color: css('--ema20', '#f59e0b'), lineWidth: 1 });
-      ema50Ref.current = chart.addLineSeries({ color: css('--ema50', '#eab308'), lineWidth: 1 });
-      bbURef.current = chart.addLineSeries({ color: css('--bb', '#60a5fa'), lineWidth: 1 });
-      bbMRef.current = chart.addLineSeries({ color: css('--bb-mid', '#93c5fd'), lineWidth: 1 });
-      bbLRef.current = chart.addLineSeries({ color: css('--bb', '#60a5fa'), lineWidth: 1 });
-      donURef.current = chart.addLineSeries({ color: css('--donchian', '#10b981'), lineWidth: 1 });
-      donLRef.current = chart.addLineSeries({ color: css('--donchian', '#10b981'), lineWidth: 1 });
+      // overlay series
+      ema20Ref.current = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1 });
+      ema50Ref.current = chart.addLineSeries({ color: '#eab308', lineWidth: 1 });
+      bbURef.current = chart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
+      bbMRef.current = chart.addLineSeries({ color: '#93c5fd', lineWidth: 1 });
+      bbLRef.current = chart.addLineSeries({ color: '#60a5fa', lineWidth: 1 });
+      donURef.current = chart.addLineSeries({ color: '#10b981', lineWidth: 1 });
+      donLRef.current = chart.addLineSeries({ color: '#10b981', lineWidth: 1 });
 
       // history
       try {
-        const data = await fetchKlines(exchange as Exchange, market as Market, symbol, interval, 500);
+        const data = await fetchKlinesWithFallback(exchange as Exchange, market as Market, symbol, interval);
         if (disposed) return;
         barsRef.current = data;
         series.setData(data);
@@ -493,13 +527,19 @@ export default function CandleChart({
       }
 
       // seed live
-      const seed = await fetchTicker(exchange as Exchange, market as Market, symbol);
-      if (seed) { setLivePriceLine(seed); computeAndDecorate(seed); }
+      const seed = await fetchTickerPriceWithFallback(exchange as Exchange, market as Market, symbol);
+      if (seed) {
+        setLivePriceLine(seed);
+        computeAndDecorate(seed);
+      }
 
-      // live
+      // live update: Binance via WS, MEXC via polling
       if (exchange === 'binance') {
-        const host = market === 'futures' ? 'wss://fstream.binance.com/ws' : 'wss://stream.binance.com:9443/ws';
-        const wsK = new WebSocket(`${host}/${symbol.toLowerCase()}@kline_${interval}`);
+        const base = market === 'futures'
+          ? 'wss://fstream.binance.com/ws'
+          : 'wss://stream.binance.com:9443/ws';
+
+        const wsK = new WebSocket(`${base}/${symbol.toLowerCase()}@kline_${interval}`);
         wsKlineRef.current = wsK;
         wsK.onopen = () => { if (wsKlineRef.current === wsK) setWsInfo(`WS: live (${symbol})`); };
         wsK.onclose = () => { if (wsKlineRef.current === wsK) setWsInfo('WS: closed'); };
@@ -522,20 +562,23 @@ export default function CandleChart({
           }
         };
 
-        const wsT = new WebSocket(`${host}/${symbol.toLowerCase()}@trade`);
+        const wsT = new WebSocket(`${base}/${symbol.toLowerCase()}@trade`);
         wsTradeRef.current = wsT;
         wsT.onmessage = (e) => {
           if (wsTradeRef.current !== wsT) return;
           const p = Number(JSON.parse(e.data)?.p);
-          if (p) { setLivePriceLine(p); computeAndDecorate(p); }
+          if (p) {
+            setLivePriceLine(p);
+            computeAndDecorate(p);
+          }
         };
       } else {
-        // MEXC: poll (spot & futures)
-        setWsInfo(market === 'futures' ? 'Poll: 2s + ticker 1s (futures)' : 'Poll: 2s + ticker 1s');
+        setWsInfo('Poll: klines 2s • ticker 1s');
+        // periodic closed-bar refresh
         let lastClosed = barsRef.current[barsRef.current.length - 1]?.time ?? 0;
         pollKlinesRef.current = setInterval(async () => {
           try {
-            const arr = await fetchKlines(exchange as Exchange, market as Market, symbol, interval, 500);
+            const arr = await fetchKlinesWithFallback('mexc', market as Market, symbol, interval);
             if (!arr.length) return;
             const latest = arr[arr.length - 1];
             barsRef.current = arr;
@@ -546,9 +589,13 @@ export default function CandleChart({
             }
           } catch {}
         }, 2000);
+        // periodic live price
         pollTickerRef.current = setInterval(async () => {
-          const p = await fetchTicker(exchange as Exchange, market as Market, symbol);
-          if (p) { setLivePriceLine(p); computeAndDecorate(p); }
+          const p = await fetchTickerPriceWithFallback('mexc', market as Market, symbol);
+          if (p) {
+            setLivePriceLine(p);
+            computeAndDecorate(p);
+          }
         }, 1000);
       }
     }
@@ -557,7 +604,8 @@ export default function CandleChart({
     return () => {
       try { wsKlineRef.current?.close(); } catch {}
       try { wsTradeRef.current?.close(); } catch {}
-      wsKlineRef.current = null; wsTradeRef.current = null;
+      wsKlineRef.current = null;
+      wsTradeRef.current = null;
       if (pollKlinesRef.current) clearInterval(pollKlinesRef.current);
       if (pollTickerRef.current) clearInterval(pollTickerRef.current);
       if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
