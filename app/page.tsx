@@ -13,194 +13,113 @@ const CandleChart = dynamic(() => import('../components/CandleChart'), { ssr: fa
 
 type QuotePreset = 'USDT' | 'USDT+USDC' | 'All stables' | 'USDC' | 'FDUSD' | 'TUSD';
 const quotesFor = (p: QuotePreset) =>
-  p === 'USDT' ? ['USDT']
-    : p === 'USDC' ? ['USDC']
-    : p === 'FDUSD' ? ['FDUSD']
-    : p === 'TUSD' ? ['TUSD']
-    : p === 'USDT+USDC' ? ['USDT', 'USDC']
-    : ['USDT', 'USDC', 'FDUSD', 'TUSD'];
+  p === 'USDT' ? ['USDT'] :
+  p === 'USDC' ? ['USDC'] :
+  p === 'FDUSD' ? ['FDUSD'] :
+  p === 'TUSD' ? ['TUSD'] :
+  p === 'USDT+USDC' ? ['USDT', 'USDC'] :
+  ['USDT', 'USDC', 'FDUSD', 'TUSD'];
 
 type Signal = {
-  label: string;
-  confidence: number;
-  entry: number;
-  sl: number;
-  tp: number;
-  riskPct: number;
-  riskBand: string;
-  reasons: string[];
+  label: string; confidence: number; entry: number; sl: number; tp: number;
+  riskPct: number; riskBand: string; reasons: string[];
 };
 
 type Config = {
-  rsiUpper: number;
-  rsiLower: number;
-  bbwMin: number;
-  donchianLen: number;
-  breakoutBufferPct: number;
+  rsiUpper: number; rsiLower: number; bbwMin: number; donchianLen: number; breakoutBufferPct: number;
   weights: { trend: number; momentum: number; breakout: number; pattern: number; regime: number };
-  longScore: number;
-  shortScore: number;
-  slATR: number;
-  tpATR: number;
+  longScore: number; shortScore: number; slATR: number; tpATR: number;
   riskBands: { lowMax: number; medMax: number };
   overlays: {
-    ema: boolean;
-    bollinger: boolean;
-    donchian: boolean;
-    signalLevels: boolean;
-    patterns: boolean;
-    nameEveryCandle: boolean;
-    channelSignals: boolean;
-    hud: boolean;
-    onBarReasons: boolean;
-    legend: boolean;
+    ema: boolean; bollinger: boolean; donchian: boolean; signalLevels: boolean;
+    patterns: boolean; nameEveryCandle: boolean; channelSignals: boolean;
+    hud: boolean; onBarReasons: boolean; legend: boolean;
   };
 };
 
 const DEFAULT_CONFIG: Config = {
-  rsiUpper: 55,
-  rsiLower: 45,
-  bbwMin: 0.035,
-  donchianLen: 20,
-  breakoutBufferPct: 0.05,
+  rsiUpper: 55, rsiLower: 45, bbwMin: 0.035, donchianLen: 20, breakoutBufferPct: 0.05,
   weights: { trend: 28, momentum: 28, breakout: 28, pattern: 12, regime: 4 },
-  longScore: 22,
-  shortScore: -22,
-  slATR: 1.8,
-  tpATR: 3.2,
+  longScore: 22, shortScore: -22, slATR: 1.8, tpATR: 3.2,
   riskBands: { lowMax: 3.5, medMax: 8.0 },
   overlays: {
-    ema: true,
-    bollinger: true,
-    donchian: true,
-    signalLevels: true,
-    patterns: true,
-    nameEveryCandle: false,
-    channelSignals: true,
-    hud: true,
-    onBarReasons: false,
-    legend: true,
+    ema: true, bollinger: true, donchian: true, signalLevels: true,
+    patterns: true, nameEveryCandle: false, channelSignals: true,
+    hud: true, onBarReasons: false, legend: true
   },
 };
 
-const ALL_TFS = [
-  '1m', '3m', '5m', '15m', '30m',
-  '1h', '2h', '4h', '6h', '8h', '12h',
-  '1d', '3d', '1w',
-] as const;
+const ALL_TFS = ['1m','3m','5m','15m','30m','1h','2h','4h','6h','8h','12h','1d','3d','1w'] as const;
 
-/* --- tiny helpers for fallback signal text --- */
+/* -------- small helpers used by fallback signal text (unchanged) -------- */
 const ema = (arr: number[], p: number) => {
-  if (!arr.length) return [] as number[];
-  const k = 2 / (p + 1);
-  const out: number[] = [];
-  let prev = arr[0];
-  for (let i = 0; i < arr.length; i++) {
-    const v = Number(arr[i]);
-    if (!i) { out.push(prev); continue; }
-    prev = v * k + prev * (1 - k);
-    out.push(prev);
-  }
+  if (!arr.length) return [];
+  const k = 2 / (p + 1); const out: number[] = []; let prev = arr[0];
+  for (let i = 0; i < arr.length; i++) { const v = Number(arr[i]); out.push(i ? v * k + prev * (1 - k) : prev); prev = out[i]; }
   return out;
 };
 const rsi = (c: number[], p = 14) => {
   if (c.length < p + 2) return Array(c.length).fill(null) as (number | null)[];
   let g = 0, l = 0;
-  for (let i = 1; i <= p; i++) {
-    const d = c[i] - c[i - 1];
-    if (d >= 0) g += d; else l -= d;
-  }
+  for (let i = 1; i <= p; i++) { const d = c[i] - c[i - 1]; if (d >= 0) g += d; else l -= d; }
   let ag = g / p, al = l / p;
   const out: (number | null)[] = Array(p).fill(null);
   out.push(100 - 100 / (1 + (ag / (al || 1e-12))));
   for (let i = p + 1; i < c.length; i++) {
-    const d = c[i] - c[i - 1];
-    const ga = Math.max(d, 0), lo = Math.max(-d, 0);
-    ag = (ag * (p - 1) + ga) / p;
-    al = (al * (p - 1) + lo) / p;
+    const d = c[i] - c[i - 1]; const ga = Math.max(d, 0), lo = Math.max(-d, 0);
+    ag = (ag * (p - 1) + ga) / p; al = (al * (p - 1) + lo) / p;
     out.push(100 - 100 / (1 + (ag / (al || 1e-12)))));
   }
   while (out.length < c.length) out.unshift(null);
   return out;
 };
-const maxN = (arr: number[], n: number) => {
-  const s = Math.max(0, arr.length - n);
-  let m = -Infinity;
-  for (let i = s; i < arr.length; i++) if (arr[i] > m) m = arr[i];
-  return m;
-};
-const minN = (arr: number[], n: number) => {
-  const s = Math.max(0, arr.length - n);
-  let m = Infinity;
-  for (let i = s; i < arr.length; i++) if (arr[i] < m) m = arr[i];
-  return m;
-};
+const maxN = (arr: number[], n: number) => { const s = Math.max(0, arr.length - n); let m = -Infinity; for (let i = s; i < arr.length; i++) if (arr[i] > m) m = arr[i]; return m; };
+const minN = (arr: number[], n: number) => { const s = Math.max(0, arr.length - n); let m = Infinity; for (let i = s; i < arr.length; i++) if (arr[i] < m) m = arr[i]; return m; };
 
-type Fallback = {
-  kind: 'ready' | 'soft';
-  side: 'LONG' | 'SHORT';
-  entry: number;
-  sl: number;
-  tp: number;
-  conf: number;
-  riskPct: number;
-  reasons: string[];
-  support: number;
-  resistance: number;
-  rsi: number;
-  ema20: number;
-  ema50: number;
-} | null;
+type Fallback =
+  | { kind: 'ready' | 'soft'; side: 'LONG'|'SHORT'; entry: number; sl: number; tp: number; conf: number; riskPct: number; reasons: string[]; support: number; resistance: number; rsi: number; ema20: number; ema50: number; };
 
 export default function Page() {
   const [exchange, setExchange] = useState<Exchange>('binance');
-  const [market, setMarket] = useState<Market>('spot');
-  const [preset, setPreset] = useState<QuotePreset>('USDT');
+  const [market, setMarket]     = useState<Market>('spot');
+  const [preset, setPreset]     = useState<QuotePreset>('USDT');
 
   const [symbols, setSymbols] = useState<string[]>(['BTCUSDT']);
-  const [symbol, setSymbol] = useState('BTCUSDT');
+  const [symbol, setSymbol]   = useState('BTCUSDT');
 
-  const [interval, setInterval] = useState<(typeof ALL_TFS)[number]>('5m');
+  const [interval, setInterval] = useState<typeof ALL_TFS[number]>('5m');
   const [cfg, setCfg] = useState<Config>(DEFAULT_CONFIG);
   const [filter, setFilter] = useState('');
   const [showInd, setShowInd] = useState(false);
 
   const [signal, setSignal] = useState<Signal | null>(null);
   const [livePrice, setLivePrice] = useState<number | null>(null);
-  const [fallback, setFallback] = useState<Fallback>(null);
+  const [fallback, setFallback] = useState<Fallback | null>(null);
 
-  // last TopSignals pick → seed DemoTradePanel if no live signal yet
   const [lastPick, setLastPick] = useState<{ entry: number; stop: number; tp: number } | null>(null);
 
   const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 });
   const sessionRef = useRef(0);
-  useEffect(() => {
-    sessionRef.current += 1;
-    setLivePrice(null);
-    setSignal(null);
-    setFallback(null);
-  }, [exchange, market, symbol, interval]);
+  useEffect(() => { sessionRef.current += 1; setLivePrice(null); setSignal(null); setFallback(null); }, [exchange, market, symbol, interval]);
 
-  // symbols by exchange/market/preset
+  // symbols by exchange/market/quotes
   useEffect(() => {
     (async () => {
       try {
         const list = await listSymbols(exchange, quotesFor(preset), market);
-        setSymbols(list);
-        setSymbol(prev => (list.includes(prev) ? prev : (list[0] ?? 'BTCUSDT')));
+        setSymbols(list && list.length ? list : ['BTCUSDT']);
+        setSymbol((prev) => (list?.includes(prev) ? prev : (list?.[0] ?? 'BTCUSDT')));
       } catch {
-        setSymbols(['BTCUSDT']);
-        setSymbol('BTCUSDT');
+        setSymbols(['BTCUSDT']); setSymbol('BTCUSDT');
       }
     })();
   }, [exchange, preset, market]);
 
-  // tweak config per timeframe
+  // TF tweak
   useEffect(() => {
-    setCfg(c => {
-      if (['1m', '3m'].includes(interval)) return { ...c, bbwMin: Math.max(0.04, c.bbwMin) };
-      if (['1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w'].includes(interval))
-        return { ...c, bbwMin: Math.min(0.03, c.bbwMin) };
+    setCfg((c) => {
+      if (['1m','3m'].includes(interval)) return { ...c, bbwMin: Math.max(0.04, c.bbwMin) };
+      if (['1h','2h','4h','6h','8h','12h','1d','3d','1w'].includes(interval)) return { ...c, bbwMin: Math.min(0.03, c.bbwMin) };
       return { ...c, bbwMin: 0.035 };
     });
   }, [interval]);
@@ -210,14 +129,25 @@ export default function Page() {
     return q ? symbols.filter(s => s.includes(q)) : symbols;
   }, [symbols, filter]);
 
-  // simple fallback suggestion (so the card isn’t blank)
+  // fallback signal so card is never blank
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const base = exchange === 'binance' ? 'https://api.binance.com' : 'https://api.mexc.com';
-        const url = `${base}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=220`;
-        const raw = await fetch(url, { cache: 'no-store' }).then(r => r.json());
+        const base =
+          exchange === 'binance'
+            ? (market === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com')
+            : 'https://api.mexc.com';
+
+        const url =
+          exchange === 'mexc' && market === 'futures'
+            ? null // MEXC futures klines format differs; rely on CandleChart (which handles it). Fallback not critical here.
+            : `${base}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=220`;
+
+        if (!url) { setFallback(null); return; }
+
+        const res = await fetch(url, { cache: 'no-store' });
+        const raw = await res.json();
         if (!Array.isArray(raw) || raw.length < 60) return;
 
         const o = raw.map((r: any) => Number(r[1]));
@@ -225,18 +155,17 @@ export default function Page() {
         const l = raw.map((r: any) => Number(r[3]));
         const c = raw.map((r: any) => Number(r[4]));
 
-        const lastIdx = c.length - 1, confIdx = lastIdx - 1, touchIdx = confIdx - 1;
+        const last = c.length - 1, confIdx = last - 1, touchIdx = confIdx - 1;
         const closes = c.slice(0, confIdx + 1);
-        const highs = h.slice(0, confIdx + 1);
-        const lows = l.slice(0, confIdx + 1);
+        const highs  = h.slice(0, confIdx + 1);
+        const lows   = l.slice(0, confIdx + 1);
 
         const support = minN(lows, 50);
         const resistance = maxN(highs, 50);
 
         const ema20 = ema(closes, 20)[closes.length - 1];
         const ema50 = ema(closes, 50)[closes.length - 1];
-        const rArr = rsi(closes, 14);
-        const r = rArr[rArr.length - 1] as number | null;
+        const r = rsi(closes, 14)[closes.length - 1] as number | null;
 
         const loTouch = l[touchIdx], hiTouch = h[touchIdx];
         const confClose = c[confIdx], confOpen = o[confIdx];
@@ -248,77 +177,33 @@ export default function Page() {
         const confAbove = confClose >= support * (1 + buf);
         const confBelow = confClose <= resistance * (1 - buf);
 
-        const riskPctFn = (e: number, s: number) => Math.abs(e - s) / e * 100;
+        const riskPct = (e: number, s: number) => Math.abs(e - s) / e * 100;
 
         if (touchedSup && bull && confAbove) {
-          const entry = confClose;
-          const sl = Math.min(support * (1 - tol), loTouch);
-          const risk = Math.max(1e-12, entry - sl);
-          const room = (resistance - entry) / entry;
+          const entry = confClose, sl = Math.min(support * (1 - tol), loTouch);
+          const risk = Math.max(1e-12, entry - sl); const room = (resistance - entry) / entry;
           const tp = room >= 0.1 ? resistance : entry + 2 * risk;
-          const conf =
-            65 +
-            (entry > ema20 ? 8 : 0) +
-            (ema20 > ema50 ? 7 : 0) +
-            Math.min(10, Math.max(0, (r ?? 50) - 50));
-          if (!cancelled) {
-            setFallback({
-              kind: 'ready',
-              side: 'LONG',
-              entry,
-              sl,
-              tp,
-              conf: Math.min(95, Math.round(conf)),
-              riskPct: riskPctFn(entry, sl),
-              reasons: ['Support touch + 1 bull confirm', 'EMA20≥EMA50'],
-              support,
-              resistance,
-              rsi: Number((r ?? 0).toFixed(2)),
-              ema20,
-              ema50,
-            });
-          }
+          const conf = Math.min(95, 65 + (entry > ema20 ? 8 : 0) + (ema20 > ema50 ? 7 : 0) + Math.min(10, Math.max(0, (r ?? 50) - 50)));
+          if (!cancelled) setFallback({ kind:'ready', side:'LONG', entry, sl, tp, conf: Math.round(conf), riskPct: riskPct(entry, sl),
+            reasons:['Support touch + 1 bull confirm','EMA20≥EMA50'], support, resistance, rsi: Number((r ?? 0).toFixed(2)), ema20, ema50 });
           return;
         }
         if (touchedRes && !bull && confBelow) {
-          const entry = confClose;
-          const sl = Math.max(resistance * (1 + tol), hiTouch);
-          const risk = Math.max(1e-12, sl - entry);
-          const room = (entry - support) / entry;
+          const entry = confClose, sl = Math.max(resistance * (1 + tol), hiTouch);
+          const risk = Math.max(1e-12, sl - entry); const room = (entry - support) / entry;
           const tp = room >= 0.1 ? support : entry - 2 * risk;
-          const conf =
-            65 +
-            (entry < ema20 ? 8 : 0) +
-            (ema20 < ema50 ? 7 : 0) +
-            Math.min(10, Math.max(0, 50 - (r ?? 50)));
-          if (!cancelled) {
-            setFallback({
-              kind: 'ready',
-              side: 'SHORT',
-              entry,
-              sl,
-              tp,
-              conf: Math.min(95, Math.round(conf)),
-              riskPct: riskPctFn(entry, sl),
-              reasons: ['Resistance touch + 1 bear confirm', 'EMA20≤EMA50'],
-              support,
-              resistance,
-              rsi: Number((r ?? 0).toFixed(2)),
-              ema20,
-              ema50,
-            });
-          }
+          const conf = Math.min(95, 65 + (entry < ema20 ? 8 : 0) + (ema20 < ema50 ? 7 : 0) + Math.min(10, Math.max(0, 50 - (r ?? 50))));
+          if (!cancelled) setFallback({ kind:'ready', side:'SHORT', entry, sl, tp, conf: Math.round(conf), riskPct: riskPct(entry, sl),
+            reasons:['Resistance touch + 1 bear confirm','EMA20≤EMA50'], support, resistance, rsi: Number((r ?? 0).toFixed(2)), ema20, ema50 });
           return;
         }
 
-        // soft suggestion
         const price = confClose;
-        const biasLong = price > ema20 && ema20 > ema50;
+        const biasLong  = price > ema20 && ema20 > ema50;
         const biasShort = price < ema20 && ema20 < ema50;
-        const roomLong = (resistance - price) / price;
+        const roomLong  = (resistance - price) / price;
         const roomShort = (price - support) / price;
-        const side: 'LONG' | 'SHORT' =
-          biasLong && !biasShort ? 'LONG' : biasShort && !biasLong ? 'SHORT' : (roomLong >= roomShort ? 'LONG' : 'SHORT');
+        const side: 'LONG' | 'SHORT' = biasLong && !biasShort ? 'LONG' : biasShort && !biasLong ? 'SHORT' : (roomLong >= roomShort ? 'LONG' : 'SHORT');
 
         let entry = price, sl: number, tp: number, confNum: number, rPct: number;
         const tolSoft = 0.0018;
@@ -338,49 +223,29 @@ export default function Page() {
           rPct = (risk / entry) * 100;
         }
         confNum = Math.max(35, Math.min(65, Math.round(confNum)));
-        if (!cancelled) {
-          setFallback({
-            kind: 'soft',
-            side,
-            entry,
-            sl,
-            tp,
-            conf: confNum,
-            riskPct: rPct,
-            reasons: ['Low-confidence candidate (no confirm)', 'Based on EMA bias + S/R room'],
-            support,
-            resistance,
-            rsi: Number((r ?? 0).toFixed(2)),
-            ema20,
-            ema50,
-          });
-        }
-      } catch {
-        if (!cancelled) setFallback(null);
-      }
+        if (!cancelled) setFallback({
+          kind:'soft', side, entry, sl, tp, conf: confNum, riskPct: rPct,
+          reasons:['Low-confidence candidate (no confirm)','Based on EMA bias + S/R room'],
+          support, resistance, rsi: Number((r ?? 0).toFixed(2)), ema20, ema50
+        });
+      } catch { if (!cancelled) setFallback(null); }
     })();
     return () => { cancelled = true; };
-  }, [exchange, symbol, interval]);
+  }, [exchange, market, symbol, interval]);
 
   function setOverlay(key: keyof Config['overlays'], on?: boolean) {
     setCfg(c => ({ ...c, overlays: { ...c.overlays, [key]: on ?? !(c.overlays as any)[key] } }));
   }
   const ov = cfg.overlays;
-  const ToolbarBtn = ({
-    label, active, onClick, title,
-  }: { label: string; active?: boolean; onClick: () => void; title?: string }) => (
-    <button
-      title={title}
-      onClick={onClick}
-      className={`w-full rounded-lg border border-neutral-900 py-2 text-lg hover:bg-neutral-900 ${active ? 'bg-neutral-900' : ''}`}
-    >
+  const ToolbarBtn = ({ label, active, onClick, title }: { label: string; active?: boolean; onClick: () => void; title?: string }) => (
+    <button title={title} onClick={onClick}
+      className={`w-full rounded-lg border border-neutral-900 py-2 text-lg hover:bg-neutral-900 ${active ? 'bg-neutral-900' : ''}`}>
       {label}
     </button>
   );
 
   const sess = sessionRef.current;
 
-  // Prefer precise trade levels for DemoTradePanel:
   const lastForPanel = useMemo(() => {
     if (signal) return { entry: signal.entry, sl: signal.sl, tp: signal.tp };
     if (lastPick) return { entry: lastPick.entry, sl: lastPick.stop, tp: lastPick.tp };
@@ -395,64 +260,35 @@ export default function Page() {
         <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-2 p-2">
           <div className="flex items-center gap-3">
             <div className="text-sm font-semibold md:text-base">📈 TV Clone</div>
-            <select
-              value={symbol}
-              onChange={(e) => setSymbol(e.target.value)}
-              className="rounded border border-neutral-800 bg-[#0e0f12] px-2 py-1 text-sm"
-            >
+            <select value={symbol} onChange={(e)=>setSymbol(e.target.value)} className="rounded bg-[#0e0f12] px-2 py-1 text-sm border border-neutral-800">
               {allowed.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
           <div className="flex items-center gap-2">
-            <select
-              value={interval}
-              onChange={(e) => setInterval(e.target.value as (typeof ALL_TFS)[number])}
-              className="rounded border border-neutral-800 bg-[#0e0f12] px-2 py-1 text-sm"
-            >
+            <select value={interval} onChange={(e)=>setInterval(e.target.value as typeof ALL_TFS[number])}
+              className="rounded bg-[#0e0f12] px-2 py-1 text-sm border border-neutral-800">
               {ALL_TFS.map(tf => <option key={tf} value={tf}>{tf}</option>)}
             </select>
-            <button
-              onClick={() => setShowInd(v => !v)}
-              className="rounded border border-neutral-800 px-2 py-1 text-sm hover:bg-neutral-900"
-            >
-              Indicators
-            </button>
+            <button onClick={()=>setShowInd(v=>!v)} className="rounded border border-neutral-800 px-2 py-1 text-sm hover:bg-neutral-900">Indicators</button>
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <select
-              value={exchange}
-              onChange={(e) => setExchange(e.target.value as Exchange)}
-              className="rounded border border-neutral-800 bg-[#0e0f12] px-2 py-1 text-sm"
-            >
+            <select value={exchange} onChange={(e)=>setExchange(e.target.value as Exchange)}
+              className="rounded bg-[#0e0f12] px-2 py-1 text-sm border border-neutral-800">
               <option value="binance">Binance</option>
               <option value="mexc">MEXC</option>
             </select>
-            <select
-              value={market}
-              onChange={(e) => setMarket(e.target.value as Market)}
-              className="rounded border border-neutral-800 bg-[#0e0f12] px-2 py-1 text-sm"
-            >
+            <select value={market} onChange={(e)=>setMarket(e.target.value as Market)}
+              className="rounded bg-[#0e0f12] px-2 py-1 text-sm border border-neutral-800">
               <option value="spot">Spot</option>
               <option value="futures">Futures</option>
             </select>
-            <select
-              value={preset}
-              onChange={(e) => setPreset(e.target.value as QuotePreset)}
-              className="rounded border border-neutral-800 bg-[#0e0f12] px-2 py-1 text-sm"
-            >
-              <option>USDT</option>
-              <option>USDT+USDC</option>
-              <option>All stables</option>
-              <option>USDC</option>
-              <option>FDUSD</option>
-              <option>TUSD</option>
+            <select value={preset} onChange={(e)=>setPreset(e.target.value as QuotePreset)}
+              className="rounded bg-[#0e0f12] px-2 py-1 text-sm border border-neutral-800">
+              <option>USDT</option><option>USDT+USDC</option><option>All stables</option>
+              <option>USDC</option><option>FDUSD</option><option>TUSD</option>
             </select>
-            <input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Find symbol (e.g. BTC)"
-              className="w-40 rounded border border-neutral-800 bg-[#0e0f12] px-2 py-1 text-sm md:w-60"
-            />
+            <input value={filter} onChange={(e)=>setFilter(e.target.value)} placeholder="Find symbol (e.g. BTC)"
+              className="w-40 rounded border border-neutral-800 bg-[#0e0f12] px-2 py-1 text-sm md:w-60" />
           </div>
         </div>
       </div>
@@ -461,15 +297,15 @@ export default function Page() {
       <div className="mx-auto grid max-w-7xl grid-cols-12 gap-2 p-2">
         {/* LEFT toolbar */}
         <aside className="col-span-1 hidden flex-col items-center gap-2 md:flex">
-          <ToolbarBtn label="🖱" title="Toggle HUD" active={ov.hud} onClick={() => setOverlay('hud')} />
-          <ToolbarBtn label="➕" title="Add/Manage Indicators" onClick={() => setShowInd(true)} />
-          <ToolbarBtn label="➖" title="Bollinger Bands" active={ov.bollinger} onClick={() => setOverlay('bollinger')} />
-          <ToolbarBtn label="📏" title="Donchian Channel" active={ov.donchian} onClick={() => setOverlay('donchian')} />
-          <ToolbarBtn label="📐" title="EMAs" active={ov.ema} onClick={() => setOverlay('ema')} />
-          <ToolbarBtn label="✏️" title="Patterns" active={ov.patterns} onClick={() => setOverlay('patterns')} />
-          <ToolbarBtn label="⬛" title="Signal Levels" active={ov.signalLevels} onClick={() => setOverlay('signalLevels')} />
-          <ToolbarBtn label="🔗" title="Channel Signals" active={ov.channelSignals} onClick={() => setOverlay('channelSignals')} />
-          <ToolbarBtn label="⚙️" title="Legend / Settings" active={ov.legend} onClick={() => setOverlay('legend')} />
+          <ToolbarBtn label="🖱" title="Toggle HUD" active={ov.hud} onClick={()=>setOverlay('hud')} />
+          <ToolbarBtn label="➕" title="Add/Manage Indicators" onClick={()=>setShowInd(true)} />
+          <ToolbarBtn label="➖" title="Bollinger Bands" active={ov.bollinger} onClick={()=>setOverlay('bollinger')} />
+          <ToolbarBtn label="📏" title="Donchian Channel" active={ov.donchian} onClick={()=>setOverlay('donchian')} />
+          <ToolbarBtn label="📐" title="EMAs" active={ov.ema} onClick={()=>setOverlay('ema')} />
+          <ToolbarBtn label="✏️" title="Patterns" active={ov.patterns} onClick={()=>setOverlay('patterns')} />
+          <ToolbarBtn label="⬛" title="Signal Levels" active={ov.signalLevels} onClick={()=>setOverlay('signalLevels')} />
+          <ToolbarBtn label="🔗" title="Channel Signals" active={ov.channelSignals} onClick={()=>setOverlay('channelSignals')} />
+          <ToolbarBtn label="⚙️" title="Legend / Settings" active={ov.legend} onClick={()=>setOverlay('legend')} />
         </aside>
 
         {/* CENTER */}
@@ -482,11 +318,12 @@ export default function Page() {
             <CandleChart
               key={`${exchange}-${market}-${symbol}-${interval}-${JSON.stringify(cfg.overlays)}`}
               exchange={exchange}
+              market={market}              // ← IMPORTANT: pass market to CandleChart
               symbol={symbol}
               interval={interval}
               config={cfg}
-              onSignal={(s) => { if (sessionRef.current === sess) setSignal(s); }}
-              onLivePrice={(p) => { if (sessionRef.current === sess) setLivePrice(p); }}
+              onSignal={(s)=>{ if (sessionRef.current === sess) setSignal(s); }}
+              onLivePrice={(p)=>{ if (sessionRef.current === sess) setLivePrice(p); }}
             />
           </section>
 
@@ -495,8 +332,8 @@ export default function Page() {
               {signal
                 ? `Signal: ${signal.label} • Confidence ${signal.confidence}%`
                 : fallback
-                  ? `Signal: ${fallback.kind === 'soft' ? 'Candidate (low confidence)' : 'Setup ready'} • ${fallback.side} • Confidence ${fallback.conf}% • Risk ${fallback.riskPct.toFixed(2)}%`
-                  : 'Signal: —'}
+                ? `Signal: ${fallback.kind === 'soft' ? 'Candidate (low confidence)' : 'Setup ready'} • ${fallback.side} • Confidence ${fallback.conf}% • Risk ${fallback.riskPct.toFixed(2)}%`
+                : 'Signal: —'}
             </div>
             {signal ? (
               <>
@@ -521,21 +358,21 @@ export default function Page() {
             )}
           </section>
 
-          {/* Demo Trade Panel */}
           <DemoTradePanel
             key={`${exchange}-${market}-${symbol}`}
             exchange={exchange}
+            market={market}
             symbol={symbol}
             livePrice={livePrice}
             lastSignal={lastForPanel}
           />
 
-          {/* Top Signals (clicking a pick updates symbol + seeds DemoTradePanel) */}
           <TopSignals
             interval={interval}
             exchange={exchange as any}
             market={market as any}
             mode="strong"
+            source="auto" // try engine first; fallback to builtin
             onSelect={(p: SignalPick) => {
               setExchange(p.exchange as Exchange);
               setMarket(p.market as Market);
@@ -554,10 +391,8 @@ export default function Page() {
       {showInd && (
         <IndicatorManager
           overlays={cfg.overlays}
-          onToggle={(k, v) =>
-            setCfg(c => ({ ...c, overlays: { ...c.overlays, [k]: v ?? !(c.overlays as any)[k] } }))
-          }
-          onClose={() => setShowInd(false)}
+          onToggle={(k, v)=>setCfg(c => ({ ...c, overlays: { ...c.overlays, [k]: v ?? !(c.overlays as any)[k] } }))}
+          onClose={()=>setShowInd(false)}
         />
       )}
     </div>
