@@ -1,4 +1,3 @@
-// app/page.tsx
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -51,40 +50,31 @@ const DEFAULT_CONFIG: Config = {
 
 const ALL_TFS = ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d","3d","1w"] as const;
 
-/* lite TA helpers for fallback text */
+/* helpers for fallback signal text */
 const ema = (arr: number[], p: number) => {
-  if (!arr.length) return [] as number[];
-  const k = 2 / (p + 1);
-  const out: number[] = [];
-  let prev = arr[0];
-  for (let i = 0; i < arr.length; i++) {
-    prev = i === 0 ? arr[i] : arr[i] * k + prev * (1 - k);
-    out.push(prev);
-  }
+  if (!arr.length) return [];
+  const k = 2 / (p + 1); const out: number[] = []; let prev = arr[0];
+  for (let i = 0; i < arr.length; i++) { const v = Number(arr[i]); out.push(i ? v * k + prev * (1 - k) : prev); prev = out[i]; }
   return out;
 };
+
+// ✅ fixed RSI helper (no stray parens)
 const rsi = (c: number[], p = 14) => {
   if (c.length < p + 2) return Array(c.length).fill(null) as (number | null)[];
-  let gains = 0, losses = 0;
-  for (let i = 1; i <= p; i++) {
-    const d = c[i] - c[i - 1];
-    if (d >= 0) gains += d; else losses -= d;
-  }
-  let ag = gains / p, al = losses / p;
-  const ratio0 = ag / (al || 1e-12);
+  let g = 0, l = 0;
+  for (let i = 1; i <= p; i++) { const d = c[i] - c[i - 1]; if (d >= 0) g += d; else l -= d; }
+  let ag = g / p, al = l / p;
   const out: (number | null)[] = Array(p).fill(null);
-  out.push(100 - 100 / (1 + ratio0));
+  out.push(100 - 100 / (1 + (ag / (al || 1e-12))));
   for (let i = p + 1; i < c.length; i++) {
-    const d = c[i] - c[i - 1];
-    const ga = Math.max(d, 0), lo = Math.max(-d, 0);
-    ag = (ag * (p - 1) + ga) / p;
-    al = (al * (p - 1) + lo) / p;
-    const ratio = ag / (al || 1e-12);
-    out.push(100 - 100 / (1 + ratio));
+    const d = c[i] - c[i - 1]; const ga = Math.max(d, 0), lo = Math.max(-d, 0);
+    ag = (ag * (p - 1) + ga) / p; al = (al * (p - 1) + lo) / p;
+    out.push(100 - 100 / (1 + (ag / (al || 1e-12))));
   }
   while (out.length < c.length) out.unshift(null);
   return out;
 };
+
 const maxN = (arr: number[], n: number) => { const s = Math.max(0, arr.length - n); let m = -Infinity; for (let i = s; i < arr.length; i++) if (arr[i] > m) m = arr[i]; return m; };
 const minN = (arr: number[], n: number) => { const s = Math.max(0, arr.length - n); let m = Infinity; for (let i = s; i < arr.length; i++) if (arr[i] < m) m = arr[i]; return m; };
 
@@ -115,7 +105,7 @@ export default function Page() {
   const sessionRef = useRef(0);
   useEffect(() => { sessionRef.current += 1; setLivePrice(null); setSignal(null); setFallback(null); }, [exchange, market, symbol, interval]);
 
-  // symbols by exchange/market/quotes (via server route)
+  // symbols by exchange/market/quotes
   useEffect(() => {
     (async () => {
       try {
@@ -142,12 +132,14 @@ export default function Page() {
     return q ? symbols.filter(s => s.includes(q)) : symbols;
   }, [symbols, filter]);
 
-  // fallback signal so card is never blank (use our own /api/klines to avoid CORS/401)
+  // fallback signal so card is never blank
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const url = `/api/klines?exchange=${exchange}&market=${market}&symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=220`;
+        // Use public spot klines only for simple fallback preview
+        const base = exchange === 'binance' ? 'https://api.binance.com' : 'https://api.mexc.com';
+        const url = `${base}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=220`;
         const raw = await fetch(url, { cache: 'no-store' }).then(r => r.json());
         if (!Array.isArray(raw) || raw.length < 60) return;
 
@@ -170,7 +162,7 @@ export default function Page() {
 
         const loTouch = l[touchIdx], hiTouch = h[touchIdx];
         const confClose = c[confIdx], confOpen = o[confIdx];
-        const bull = confClose >= confOpen;
+        const bull = confClose >= confOpen, bear = !bull;
 
         const tol = 0.0015, buf = 0.0020;
         const touchedSup = loTouch <= support * (1 + tol);
@@ -189,7 +181,7 @@ export default function Page() {
             reasons:['Support touch + 1 bull confirm','EMA20≥EMA50'], support, resistance, rsi: Number((r ?? 0).toFixed(2)), ema20, ema50 });
           return;
         }
-        if (touchedRes && !bull && confBelow) {
+        if (touchedRes && bear && confBelow) {
           const entry = confClose, sl = Math.max(resistance * (1 + tol), hiTouch);
           const risk = Math.max(1e-12, sl - entry); const room = (entry - support) / entry;
           const tp = room >= 0.1 ? support : entry - 2 * risk;
@@ -232,7 +224,7 @@ export default function Page() {
       } catch { if (!cancelled) setFallback(null); }
     })();
     return () => { cancelled = true; };
-  }, [exchange, market, symbol, interval]);
+  }, [exchange, symbol, interval]);
 
   function setOverlay(key: keyof Config['overlays'], on?: boolean) {
     setCfg(c => ({ ...c, overlays: { ...c.overlays, [key]: on ?? !(c.overlays as any)[key] } }));
@@ -320,7 +312,7 @@ export default function Page() {
             <CandleChart
               key={`${exchange}-${market}-${symbol}-${interval}-${JSON.stringify(cfg.overlays)}`}
               exchange={exchange}
-              market={market}          // ✅ added
+              market={market}          // ✅ now passed through
               symbol={symbol}
               interval={interval}
               config={cfg}
@@ -374,8 +366,8 @@ export default function Page() {
               Clicking a pick updates exchange/market/symbol and seeds DemoTradePanel. */}
           <TopSignals
             interval={interval}
-            exchange={exchange as any}   // 'binance' | 'mexc' | 'both' accepted by the component
-            market={market as any}       // 'spot' | 'futures' | 'both'
+            exchange={exchange as any}
+            market={market as any}
             mode="strong"
             onSelect={(p: SignalPick) => {
               setExchange(p.exchange as Exchange);
