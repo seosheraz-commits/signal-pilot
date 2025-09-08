@@ -54,10 +54,21 @@ const ALL_TFS = ["1m","3m","5m","15m","30m","1h","2h","4h","6h","8h","12h","1d",
 /* helpers for fallback signal text */
 const ema = (arr: number[], p: number) => {
   if (!arr.length) return [];
-  const k = 2 / (p + 1); const out: number[] = []; let prev = arr[0];
-  for (let i = 0; i < arr.length; i++) { const v = Number(arr[i]); out.push(i ? v * k + prev * (1 - k) : prev); prev = out[i]; }
+  const k = 2 / (p + 1);
+  const out: number[] = [];
+  let prev = arr[0];
+  for (let i = 0; i < arr.length; i++) {
+    const v = Number(arr[i]);
+    if (i === 0) out.push(prev);
+    else {
+      const next = v * k + prev * (1 - k);
+      out.push(next);
+      prev = next;
+    }
+  }
   return out;
 };
+
 const rsi = (c: number[], p = 14) => {
   if (c.length < p + 2) return Array(c.length).fill(null) as (number | null)[];
   let g = 0, l = 0;
@@ -75,8 +86,20 @@ const rsi = (c: number[], p = 14) => {
   while (out.length < c.length) out.unshift(null);
   return out;
 };
-const maxN = (arr: number[], n: number) => { const s = Math.max(0, arr.length - n); let m = -Infinity; for (let i = s; i < arr.length; i++) if (arr[i] > m) m = arr[i]; return m; };
-const minN = (arr: number[], n: number) => { const s = Math.max(0, arr.length - n); let m = Infinity; for (let i = s; i < arr.length; i++) if (arr[i] < m) m = arr[i]; return m; };
+
+const maxN = (arr: number[], n: number) => {
+  const s = Math.max(0, arr.length - n);
+  let m = -Infinity;
+  for (let i = s; i < arr.length; i++) if (arr[i] > m) m = arr[i];
+  return m;
+};
+
+const minN = (arr: number[], n: number) => {
+  const s = Math.max(0, arr.length - n);
+  let m = Infinity;
+  for (let i = s; i < arr.length; i++) if (arr[i] < m) m = arr[i];
+  return m;
+};
 
 type Fallback =
   | { kind: 'ready' | 'soft'; side: 'LONG'|'SHORT'; entry: number; sl: number; tp: number; conf: number; riskPct: number; reasons: string[]; support: number; resistance: number; rsi: number; ema20: number; ema50: number; };
@@ -98,7 +121,7 @@ export default function Page() {
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [fallback, setFallback] = useState<Fallback | null>(null);
 
-  // also keep last pick from TopSignals to seed DemoTradePanel
+  // keep last pick from TopSignals to seed DemoTradePanel when no live signal yet
   const [lastPick, setLastPick] = useState<{ entry: number; stop: number; tp: number } | null>(null);
 
   const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 });
@@ -107,15 +130,19 @@ export default function Page() {
 
   // symbols by exchange/market/quotes
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         const list = await listSymbols(exchange, quotesFor(preset), market);
+        if (cancelled) return;
         setSymbols(list);
         setSymbol((prev) => (list.includes(prev) ? prev : (list[0] ?? 'BTCUSDT')));
       } catch {
+        if (cancelled) return;
         setSymbols(['BTCUSDT']); setSymbol('BTCUSDT');
       }
     })();
+    return () => { cancelled = true; };
   }, [exchange, preset, market]);
 
   // TF tweak
@@ -132,22 +159,20 @@ export default function Page() {
     return q ? symbols.filter(s => s.includes(q)) : symbols;
   }, [symbols, filter]);
 
-  // fallback signal so card is never blank — uses your own /api/klines (works for both exchanges & markets)
+  // fallback signal so card is never blank (reads spot klines from exchange REST)
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const url = `/api/klines?exchange=${exchange}&market=${market}&symbol=${symbol}&interval=${interval}&limit=220`;
-        const r = await fetch(url, { cache: 'no-store' });
-        const d = await r.json();
-        const raw: any[] = Array.isArray(d?.candles) ? d.candles : [];
-        if (!raw.length) return;
+        const base = exchange === 'binance' ? 'https://api.binance.com' : 'https://api.mexc.com';
+        const url = `${base}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=220`;
+        const raw = await fetch(url, { cache: 'no-store' }).then(r => r.json());
+        if (!Array.isArray(raw) || raw.length < 60) return;
 
         const o = raw.map((r: any) => Number(r[1]));
         const h = raw.map((r: any) => Number(r[2]));
         const l = raw.map((r: any) => Number(r[3]));
         const c = raw.map((r: any) => Number(r[4]));
-        if (c.length < 60) return;
 
         const last = c.length - 1, confIdx = last - 1, touchIdx = confIdx - 1;
         const closes = c.slice(0, confIdx + 1);
@@ -159,7 +184,7 @@ export default function Page() {
 
         const ema20 = ema(closes, 20)[closes.length - 1];
         const ema50 = ema(closes, 50)[closes.length - 1];
-        const rsiVal = rsi(closes, 14)[closes.length - 1] as number | null;
+        const r = rsi(closes, 14)[closes.length - 1] as number | null;
 
         const loTouch = l[touchIdx], hiTouch = h[touchIdx];
         const confClose = c[confIdx], confOpen = o[confIdx];
@@ -177,18 +202,18 @@ export default function Page() {
           const entry = confClose, sl = Math.min(support * (1 - tol), loTouch);
           const risk = Math.max(1e-12, entry - sl); const room = (resistance - entry) / entry;
           const tp = room >= 0.1 ? resistance : entry + 2 * risk;
-          const conf = Math.min(95, 65 + (entry > ema20 ? 8 : 0) + (ema20 > ema50 ? 7 : 0) + Math.min(10, Math.max(0, (rsiVal ?? 50) - 50)));
+          const conf = Math.min(95, 65 + (entry > ema20 ? 8 : 0) + (ema20 > ema50 ? 7 : 0) + Math.min(10, Math.max(0, (r ?? 50) - 50)));
           if (!cancelled) setFallback({ kind:'ready', side:'LONG', entry, sl, tp, conf: Math.round(conf), riskPct: riskPct(entry, sl),
-            reasons:['Support touch + 1 bull confirm','EMA20≥EMA50'], support, resistance, rsi: Number((rsiVal ?? 0).toFixed(2)), ema20, ema50 });
+            reasons:['Support touch + 1 bull confirm','EMA20≥EMA50'], support, resistance, rsi: Number((r ?? 0).toFixed(2)), ema20, ema50 });
           return;
         }
         if (touchedRes && bear && confBelow) {
           const entry = confClose, sl = Math.max(resistance * (1 + tol), hiTouch);
           const risk = Math.max(1e-12, sl - entry); const room = (entry - support) / entry;
           const tp = room >= 0.1 ? support : entry - 2 * risk;
-          const conf = Math.min(95, 65 + (entry < ema20 ? 8 : 0) + (ema20 < ema50 ? 7 : 0) + Math.min(10, Math.max(0, 50 - (rsiVal ?? 50))));
+          const conf = Math.min(95, 65 + (entry < ema20 ? 8 : 0) + (ema20 < ema50 ? 7 : 0) + Math.min(10, Math.max(0, 50 - (r ?? 50))));
           if (!cancelled) setFallback({ kind:'ready', side:'SHORT', entry, sl, tp, conf: Math.round(conf), riskPct: riskPct(entry, sl),
-            reasons:['Resistance touch + 1 bear confirm','EMA20≤EMA50'], support, resistance, rsi: Number((rsiVal ?? 0).toFixed(2)), ema20, ema50 });
+            reasons:['Resistance touch + 1 bear confirm','EMA20≤EMA50'], support, resistance, rsi: Number((r ?? 0).toFixed(2)), ema20, ema50 });
           return;
         }
 
@@ -206,26 +231,26 @@ export default function Page() {
           const risk = Math.max(1e-12, entry - sl);
           const tpPct = Math.max(1.4 * (risk / entry), Math.min(roomLong, 0.12));
           tp = entry * (1 + tpPct);
-          confNum = 40 + (biasLong ? 8 : 0) + Math.min(10, Math.max(0, (rsiVal ?? 50) - 48)) + Math.min(7, roomLong * 50);
+          confNum = 40 + (biasLong ? 8 : 0) + Math.min(10, Math.max(0, (r ?? 50) - 48)) + Math.min(7, roomLong * 50);
           rPct = (risk / entry) * 100;
         } else {
           sl = resistance * (1 + tolSoft);
           const risk = Math.max(1e-12, sl - entry);
           const tpPct = Math.max(1.4 * (risk / entry), Math.min(roomShort, 0.12));
           tp = entry * (1 - tpPct);
-          confNum = 40 + (biasShort ? 8 : 0) + Math.min(10, Math.max(0, 52 - (rsiVal ?? 50))) + Math.min(7, roomShort * 50);
+          confNum = 40 + (biasShort ? 8 : 0) + Math.min(10, Math.max(0, 52 - (r ?? 50))) + Math.min(7, roomShort * 50);
           rPct = (risk / entry) * 100;
         }
         confNum = Math.max(35, Math.min(65, Math.round(confNum)));
         if (!cancelled) setFallback({
           kind:'soft', side, entry, sl, tp, conf: confNum, riskPct: rPct,
           reasons:['Low-confidence candidate (no confirm)','Based on EMA bias + S/R room'],
-          support, resistance, rsi: Number((rsiVal ?? 0).toFixed(2)), ema20, ema50
+          support, resistance, rsi: Number((r ?? 0).toFixed(2)), ema20, ema50
         });
       } catch { if (!cancelled) setFallback(null); }
     })();
     return () => { cancelled = true; };
-  }, [exchange, market, symbol, interval]);
+  }, [exchange, symbol, interval]);
 
   function setOverlay(key: keyof Config['overlays'], on?: boolean) {
     setCfg(c => ({ ...c, overlays: { ...c.overlays, [key]: on ?? !(c.overlays as any)[key] } }));
@@ -361,13 +386,13 @@ export default function Page() {
             lastSignal={lastForPanel}
           />
 
-          {/* Top Signals — clicking a pick updates exchange/market/symbol and seeds DemoTradePanel. */}
+          {/* Top Signals — pull from engine; clicking a pick updates exchange/market/symbol and seeds DemoTradePanel. */}
           <TopSignals
             interval={interval}
-            exchange={exchange as any}   // 'binance' | 'mexc' | 'both' accepted
-            market={market as any}       // 'spot' | 'futures' | 'both' accepted
+            exchange={exchange as any}   // 'binance' | 'mexc' | 'both'
+            market={market as any}       // 'spot' | 'futures' | 'both'
             mode="strong"
-            source="auto"
+            source="engine"              // force engine so it doesn’t fall back
             onSelect={(p: SignalPick) => {
               setExchange(p.exchange as Exchange);
               setMarket(p.market as Market);
