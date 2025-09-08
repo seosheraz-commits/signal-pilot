@@ -3,34 +3,35 @@ export type Exchange = 'binance' | 'mexc';
 export type Market = 'spot' | 'futures';
 
 /**
- * Fetch symbols via our server route /api/symbols to avoid CORS, partial data,
- * and to get a unioned, de-duplicated list per exchange+market.
+ * ALWAYS ask our own /api/symbols so we avoid browser CORS and get full lists.
+ * Server route already merges/fixes MEXC + Binance quirks.
  */
 export async function listSymbols(
   exchange: Exchange,
   quotes: string[] = ['USDT'],
   market: Market = 'spot'
 ): Promise<string[]> {
-  const qex = encodeURIComponent(exchange);
-  const qmk = encodeURIComponent(market);
-  const res = await fetch(`/api/symbols?exchange=${qex}&market=${qmk}`, { cache: 'no-store' });
-
-  if (!res.ok) throw new Error(`symbols ${res.status}`);
-  const data = await res.json();
-
-  const want = new Set(quotes.map(q => q.toUpperCase()));
-  const list: string[] = (data?.symbols || [])
-    .filter((s: any) => s && String(s.exchange).toLowerCase() === exchange && String(s.market).toLowerCase() === market)
-    .filter((s: any) => want.has(String(s.quote || '').toUpperCase()))
-    .map((s: any) => String(s.symbol).toUpperCase());
-
-  // Fallback in the absolute worst case.
-  if (!list.length) return ['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT'];
-  return uniq(list).sort();
+  try {
+    const params = new URLSearchParams({
+      exchange,
+      market,
+    });
+    const r = await fetch(`/api/symbols?${params.toString()}`, { cache: 'no-store' });
+    if (!r.ok) throw new Error(String(r.status));
+    const j = await r.json();
+    const want = new Set(quotes.map(q => q.toUpperCase()));
+    const list: string[] = (j.symbols || [])
+      .filter((s: any) => want.has(String(s.quote || 'USDT').toUpperCase()))
+      .map((s: any) => String(s.symbol).toUpperCase());
+    return uniq(list).sort();
+  } catch {
+    // fallback keeps the UI alive
+    return ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','BNBUSDT'];
+  }
 }
 
 function uniq<T>(arr: T[]): T[] {
-  const s = new Set<T>(), out: T[] = [];
+  const s = new Set<T>(); const out: T[] = [];
   for (const v of arr) if (!s.has(v)) { s.add(v); out.push(v); }
   return out;
 }
