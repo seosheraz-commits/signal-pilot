@@ -76,12 +76,12 @@ const rsi = (c: number[], p = 14) => {
   for (let i = 1; i <= p; i++) { const d = c[i] - c[i - 1]; if (d >= 0) g += d; else l -= d; }
   let ag = g / p, al = l / p;
   const out: (number | null)[] = Array(p).fill(null);
-  out.push(100 - 100 / (1 + (ag / (al || 1e-12))));
+  out.push(100 - 100 / (1 + (ag / (al || 1e-12)))));
   for (let i = p + 1; i < c.length; i++) {
     const d = c[i] - c[i - 1];
     const ga = Math.max(d, 0), lo = Math.max(-d, 0);
     ag = (ag * (p - 1) + ga) / p; al = (al * (p - 1) + lo) / p;
-    out.push(100 - 100 / (1 + (ag / (al || 1e-12))));
+    out.push(100 - 100 / (1 + (ag / (al || 1e-12)))));
   }
   while (out.length < c.length) out.unshift(null);
   return out;
@@ -109,22 +109,16 @@ export default function Page() {
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [fallback, setFallback] = useState<Fallback | null>(null);
 
-  // keep last pick from TopSignals to seed DemoTradePanel when no live signal yet
+  // also keep last pick from TopSignals to seed DemoTradePanel
   const [lastPick, setLastPick] = useState<{ entry: number; stop: number; tp: number } | null>(null);
 
   const nf = new Intl.NumberFormat(undefined, { maximumFractionDigits: 8 });
   const sessionRef = useRef(0);
   useEffect(() => { sessionRef.current += 1; setLivePrice(null); setSignal(null); setFallback(null); }, [exchange, market, symbol, interval]);
 
-  // robust symbol loader: try our API, then client fallbacks per exchange/market
+  // robust symbol loader: API first, client fallback
   useEffect(() => {
     let cancelled = false;
-
-    async function fetchJSON(url: string) {
-      const r = await fetch(url, { cache: 'no-store' });
-      if (!r.ok) throw new Error(String(r.status));
-      return r.json();
-    }
 
     async function fromApi(): Promise<string[]> {
       const r = await fetch(`/api/symbols?exchange=${exchange}&market=${market}`, { cache: 'no-store' });
@@ -138,6 +132,11 @@ export default function Page() {
       return list;
     }
 
+    async function fetchJSON(url: string) {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error(String(r.status));
+      return r.json();
+    }
     async function clientFallback(): Promise<string[]> {
       const want = new Set(quotesFor(preset).map(s => s.toUpperCase()));
       if (exchange === 'binance') {
@@ -150,7 +149,6 @@ export default function Page() {
           .filter((s: any) => want.has(String(s.quoteAsset).toUpperCase()))
           .map((s: any) => String(s.symbol).toUpperCase());
       } else {
-        // MEXC: use exchangeInfo, fallback to ticker/24hr
         try {
           const d = await fetchJSON('https://api.mexc.com/api/v3/exchangeInfo');
           const a = (d.symbols || [])
@@ -189,7 +187,7 @@ export default function Page() {
     return () => { cancelled = true; };
   }, [exchange, preset, market]);
 
-  // TF tweak
+  // tweak config by TF
   useEffect(() => {
     setCfg((c) => {
       if (['1m','3m'].includes(interval)) return { ...c, bbwMin: Math.max(0.04, c.bbwMin) };
@@ -208,11 +206,14 @@ export default function Page() {
     let cancelled = false;
     (async () => {
       try {
-        const base =
-          exchange === 'binance'
-            ? (market === 'futures' ? 'https://fapi.binance.com' : 'https://api.binance.com')
-            : 'https://api.mexc.com'; // for MEXC we only use spot klines here for a rough read
-        const url = `${base}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=220`;
+        let url = '';
+        if (exchange === 'binance') {
+          url = market === 'futures'
+            ? `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=220`
+            : `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=220`;
+        } else {
+          url = `https://api.mexc.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=220`;
+        }
         const raw = await fetch(url, { cache: 'no-store' }).then(r => r.json());
         if (!Array.isArray(raw) || raw.length < 60) return;
 
@@ -425,7 +426,6 @@ export default function Page() {
             )}
           </section>
 
-          {/* Demo Trade Panel uses either the live signal, last TopSignals pick, or the fallback */}
           <DemoTradePanel
             key={`${exchange}-${market}-${symbol}`}
             exchange={exchange}
@@ -435,7 +435,6 @@ export default function Page() {
             lastSignal={lastForPanel}
           />
 
-          {/* Top Signals — try engine first, then builtin fallback automatically (see component fix) */}
           <TopSignals
             interval={interval}
             exchange={exchange as any}
