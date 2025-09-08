@@ -44,52 +44,74 @@ export default function TopSignals({
   const [busy, setBusy] = React.useState(false);
   const [used, setUsed] = React.useState<Source>('builtin');
 
+  const runBuiltin = React.useCallback(async () => {
+    const url = `/api/top-signals?mode=${mode}&exchange=${exchange}&market=${market}&interval=${interval}&cap=400`;
+    const r = await fetch(url, { cache: 'no-store' });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    const mapped: Pick[] = (d?.picks || []).map((p: any) => ({
+      exchange: String(p.exchange || '').toLowerCase() === 'mexc' ? 'mexc' : 'binance',
+      market:   String(p.market   || '').toLowerCase().includes('fut') ? 'futures' : 'spot',
+      symbol:   String(p.symbol || ''),
+      side:     String(p.side   || '').toLowerCase() === 'short' ? 'short' : 'long',
+      confidencePercent: Number(p.confidencePercent ?? 0),
+      riskPercent:       Number(p.riskPercent ?? 0),
+      entry: Number(p.entry ?? 0),
+      stop:  Number(p.stop  ?? 0),
+      tp:    Number(p.tp    ?? 0),
+      reason: String(p.reason || p.note || ''),
+    }));
+    return mapped;
+  }, [mode, exchange, market, interval]);
+
   const run = React.useCallback(async () => {
     setBusy(true);
     setErr(null);
     try {
-      let data: any = null;
       let usedSource: Source = 'builtin';
+      let out: Pick[] = [];
 
-      // 1) Try ENGINE if allowed
+      // Prefer ENGINE first when allowed
       if (source !== 'builtin') {
-        const engUrl = `/api/engine/scan?interval=${interval}&market=${market}`;
         try {
+          const engUrl = `/api/engine/scan?interval=${interval}&market=${market}`;
           const r = await fetch(engUrl, { cache: 'no-store' });
           const d = await r.json();
           if (!d.error && Array.isArray(d.picks)) {
-            data = d;
+            const mapped: Pick[] = d.picks.map((p: any) => ({
+              exchange: String(p.exchange || '').toLowerCase() === 'mexc' ? 'mexc' : 'binance',
+              market:   String(p.market   || '').toLowerCase().includes('fut') ? 'futures' : 'spot',
+              symbol:   String(p.symbol || ''),
+              side:     String(p.side   || '').toLowerCase() === 'short' ? 'short' : 'long',
+              confidencePercent: Number(p.confidencePercent ?? 0),
+              riskPercent:       Number(p.riskPercent ?? 0),
+              entry: Number(p.entry ?? p.price ?? 0),
+              stop:  Number(p.stop  ?? p.stopLoss ?? 0),
+              tp:    Number(p.tp    ?? p.takeProfit ?? 0),
+              reason: String(p.reason || p.reasoning || 'engine'),
+            }));
+            out = mapped;
             usedSource = 'engine';
           }
-        } catch { /* fall back */ }
+        } catch { /* swallow and fallback */ }
       }
 
-      // 2) Fallback to BUILTIN if needed
-      if ((!data || !Array.isArray(data.picks)) && source !== 'engine') {
-        const url = `/api/top-signals?mode=${mode}&exchange=${exchange}&market=${market}&interval=${interval}&cap=400`;
-        const r = await fetch(url, { cache: 'no-store' });
-        const d = await r.json();
-        if (d.error) throw new Error(d.error);
-        data = d;
+      // Client-side filter for user-chosen exchange/market
+      const applyFilters = (arr: Pick[]) => {
+        let f = arr.slice();
+        if (exchange !== 'both') f = f.filter(p => p.exchange === exchange);
+        if (market   !== 'both') f = f.filter(p => p.market   === market);
+        return f;
+      };
+
+      // If engine produced nothing or filtered to zero, fallback to builtin
+      if (out.length === 0 || applyFilters(out).length === 0) {
+        out = await runBuiltin();
         usedSource = 'builtin';
       }
 
-      let out: Pick[] = (data?.picks || []).map((p: any) => ({
-        exchange: String(p.exchange || '').toLowerCase() === 'mexc' ? 'mexc' : 'binance',
-        market:   String(p.market   || '').toLowerCase().includes('fut') ? 'futures' : 'spot',
-        symbol:   String(p.symbol || ''),
-        side:     String(p.side   || '').toLowerCase() === 'short' ? 'short' : 'long',
-        confidencePercent: Number(p.confidencePercent ?? 0),
-        riskPercent:       Number(p.riskPercent ?? 0),
-        entry: Number(p.entry ?? p.price ?? 0),
-        stop:  Number(p.stop  ?? p.stopLoss ?? 0),
-        tp:    Number(p.tp    ?? p.takeProfit ?? 0),
-        reason: String(p.reason || p.reasoning || p.note || ''),
-      }));
-
-      // Client-side filter for user-chosen exchange/market
-      if (exchange !== 'both') out = out.filter(p => p.exchange === exchange);
-      if (market   !== 'both') out = out.filter(p => p.market   === market);
+      // Final filter
+      out = applyFilters(out);
 
       setPicks(out);
       setTs(new Date());
@@ -100,7 +122,7 @@ export default function TopSignals({
     } finally {
       setBusy(false);
     }
-  }, [mode, exchange, market, interval, source]);
+  }, [source, interval, market, exchange, runBuiltin]);
 
   React.useEffect(() => {
     run();
@@ -114,7 +136,7 @@ export default function TopSignals({
       <div className="mb-2 flex items-center justify-between">
         <h3 className="font-semibold text-zinc-100">Top Signals</h3>
         <div className="text-xs text-zinc-400">
-          {used === 'engine' ? `Engine` : `Mode ${mode}`} • {ts ? ts.toLocaleTimeString() : '—'}
+          {used === 'engine' ? 'Engine' : `Mode ${mode}`} • {ts ? ts.toLocaleTimeString() : '—'}
         </div>
       </div>
 
